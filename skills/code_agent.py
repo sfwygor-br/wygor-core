@@ -13,47 +13,55 @@ load_dotenv()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OLLAMA_BASE_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").split('/api')[0].rstrip('/')
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
-CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "qwen2.5-coder:3b")
+CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "qwen2.5-coder:14b")
+
+VERBOSE = False
+
+def vprint(*args, **kwargs):
+    if VERBOSE:
+        print(*args, **kwargs)
 
 def sanitize_for_json(text):
     if not text:
         return ""
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    text = re.sub(r'[^\x20-\x7E\n\r\t]', '', text)
     return text
 
-def ask_llm(prompt, system_prompt="Você é um engenheiro de software especialista em automação."):
-    """Consulta o Ollama e extrai o bloco JSON com resiliência."""
-    full_prompt = f"{system_prompt}\n\nInstrução: {prompt}\n\nResponda APENAS com um objeto JSON válido no formato solicitado."
-    
+def ask_llm(prompt, system_prompt="Você é um engenheiro de software.", max_retries=2):
+    """Consulta o Ollama e extrai JSON com retry e reparo."""
+    full_prompt = f"{system_prompt}\n\nInstrução: {prompt}\n\nResponda APENAS com um objeto JSON válido."
     payload = {
         "model": CHAT_MODEL,
         "prompt": full_prompt,
         "stream": False
     }
-    
     req = urllib.request.Request(
         OLLAMA_GENERATE_URL,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"}
     )
-    
-    try:
-        with urllib.request.urlopen(req) as response:
-            res = json.loads(response.read().decode("utf-8"))
-            raw_response = res.get("response", "")
-            # Sanitiza
-            raw_response = sanitize_for_json(raw_response)
-            # Tenta extrair bloco JSON
-            json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group(0), strict=False)
-            return json.loads(raw_response, strict=False)
-    except Exception as e:
-        print(f"❌ Erro ao comunicar com Ollama: {e}", file=sys.stderr)
-        return {}
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(req) as response:
+                res = json.loads(response.read().decode("utf-8"))
+                raw = res.get("response", "")
+                raw = sanitize_for_json(raw)
+                json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+                if json_match:
+                    raw_json = json_match.group(0)
+                    raw_json = re.sub(r',\s*}', '}', raw_json)
+                    raw_json = re.sub(r',\s*]', ']', raw_json)
+                    return json.loads(raw_json, strict=False)
+                else:
+                    return json.loads(raw, strict=False)
+        except Exception as e:
+            vprint(f"⚠️ Tentativa {attempt+1} falhou: {e}")
+            if attempt == max_retries - 1:
+                return {}
+    return {}
 
 def run_skill(script_name, args_list):
-    """Executa uma skill local e captura o resultado."""
     script_path = os.path.join(SCRIPT_DIR, script_name)
     try:
         res = subprocess.run(
@@ -62,12 +70,11 @@ def run_skill(script_name, args_list):
             stderr=subprocess.PIPE,
             text=True
         )
-        return res.returncode == 0, res.stdout.strip() if res.stdout else "", res.stderr.strip() if res.stderr else ""
+        return res.returncode == 0, res.stdout.strip(), res.stderr.strip()
     except Exception as e:
         return False, "", str(e)
 
 def detect_and_install_missing_module(error_log):
-    """Verifica se o erro contém ModuleNotFoundError e tenta instalar o pacote."""
     match = re.search(r"ModuleNotFoundError: No module named '(\w+)'", error_log)
     if match:
         module = match.group(1)
@@ -81,78 +88,138 @@ def detect_and_install_missing_module(error_log):
             return False
     return False
 
-def run_agent_task(prompt_task, project_path=".", project_name="default", max_retries=3, no_tests=False):
+def normalize_files(files_data):
+    """
+    Converte diferentes formatos de 'files' para uma lista padronizada:
+    [{"path": "nome.py", "content": "..."}]
+    """
+    if isinstance(files_data, list):
+        # Já está no formato esperado
+        return files_data
+    elif isinstance(files_data, dict):
+        # Formato: {"arquivo.py": "conteúdo", ...}
+        normalized = []
+        for path, content in files_data.items():
+            normalized.append({"path": path, "content": content})
+        return normalized
+    else:
+        return []
+
+def run_agent_task(prompt_task, project_path=".", project_name="default", max_retries=3, no_tests=False, verbose=False):
+    global VERBOSE
+    VERBOSE = verbose
+
     print(f"\n🤖 [WYGOR CODE AGENT] Processando solicitação: '{prompt_task}'\n")
 
     abs_project_path = os.path.abspath(project_path)
 
-    # 1. Preparar Git Branch
+    # 1. Git Prepare
     task_slug = prompt_task[:25].lower().replace(" ", "-")
     print("1️⃣ [Git Guard] Isolando workspace...")
     run_skill("git_guard.py", ["prepare", project_path, "-t", task_slug])
 
-    # 2. Resgatar Contexto RAG
+    # 2. RAG Context (truncado)
+    print("2️⃣ [Context Gathering] Buscando contexto no pgvector...")
     ok, ctx, _ = run_skill("query_knowledge.py", [prompt_task, "-p", project_name, "-l", "2", "--raw"])
-    context_str = f"Contexto do Projeto:\n{ctx}" if ctx else "Nenhum contexto prévio necessário."
-
-    # 3. Planejar Código e Arquivos via LLM
-    if no_tests:
-        test_instructions = "NÃO crie arquivos de testes unitários. Foque na aplicação principal e informe o 'run_cmd' para executá-la."
-        format_example = f"""{{
-  "files": [
-    {{
-      "path": "main.py",
-      "content": "print('Hello World')"
-    }}
-  ],
-  "run_cmd": "python3 main.py"
-}}"""
+    if ctx and len(ctx) > 1000:
+        ctx = ctx[:1000] + "\n... (contexto truncado)"
+    if ctx:
+        vprint("📚 [RAG Context]:")
+        vprint(ctx)
     else:
-        test_instructions = "Crie o código-fonte e também os testes unitários correspondentes."
-        format_example = f"""{{
-  "files": [
-    {{
-      "path": "src/scientific_calc.py",
-      "content": "import math\\n\\ndef power(base, exp):\\n    return base ** exp"
-    }},
-    {{
-      "path": "tests/test_scientific_calc.py",
-      "content": "import unittest\\nfrom src.scientific_calc import power\\n\\nclass TestCalc(unittest.TestCase):\\n    def test_power(self):\\n        self.assertEqual(power(2, 3), 8)"
-    }}
-  ],
-  "test_cmd": "PYTHONPATH={abs_project_path} python3 -m unittest discover -s {abs_project_path}/tests -p 'test_*.py'",
-  "run_cmd": "python3 src/scientific_calc.py"
-}}"""
+        vprint("ℹ️ Nenhum contexto específico.")
 
-    planning_prompt = f"""
-Sua tarefa é implementar a seguinte solicitação: "{prompt_task}".
+    context_str = f"Contexto:\n{ctx}" if ctx else ""
+
+    # 3. Planejamento com loop de tentativas
+    plan = None
+    files = []
+    run_cmd = None
+    test_cmd = None
+
+    if no_tests:
+        test_instructions = "NÃO crie testes. Foque na aplicação principal e informe 'run_cmd'."
+        format_example = {
+            "files": [{"path": "main.py", "content": "código funcional"}],
+            "run_cmd": "python3 main.py"
+        }
+    else:
+        test_instructions = "Crie código e testes unitários."
+        format_example = {
+            "files": [
+                {"path": "src/app.py", "content": "..."},
+                {"path": "tests/test_app.py", "content": "..."}
+            ],
+            "test_cmd": "python3 -m unittest discover",
+            "run_cmd": "python3 src/app.py"
+        }
+
+    for attempt in range(1, 4):  # até 3 tentativas
+        print(f"3️⃣ [LLM Planning] Tentativa {attempt}/3...")
+        planning_prompt = f"""
+Tarefa: {prompt_task}
 {context_str}
 
-Instruções adicionais: {test_instructions}
+DIRETRIZES:
+- Código executável e completo.
+- Use 'requests' se precisar de API, trate erros.
+- Aceite argumentos via sys.argv ou input().
+- Inclua if __name__ == "__main__".
+- Saída útil no console.
 
-Retorne um JSON no seguinte formato estrito:
-{format_example}
+{test_instructions}
+
+Retorne JSON estrito com:
+{json.dumps(format_example, indent=2)}
 """
-    print("2️⃣ [LLM Planning] Gerando arquitetura e código-fonte...")
-    plan = ask_llm(planning_prompt)
-    files = plan.get("files", [])
-    test_cmd = plan.get("test_cmd", f"PYTHONPATH={abs_project_path} python3 -m unittest discover -s {abs_project_path}/tests -p 'test_*.py'")
-    run_cmd = plan.get("run_cmd", None)
+        plan = ask_llm(planning_prompt)
+
+        if not plan:
+            vprint("   ⚠️ Plano vazio. Tentando novamente...")
+            continue
+
+        # Normaliza o campo 'files'
+        raw_files = plan.get("files", [])
+        files = normalize_files(raw_files)
+        run_cmd = plan.get("run_cmd", None)
+        test_cmd = plan.get("test_cmd", None)
+
+        if files:
+            vprint("🧠 [Plano Gerado]:")
+            vprint(json.dumps(plan, indent=2, ensure_ascii=False))
+            break
+        else:
+            vprint("   ⚠️ Campo 'files' inválido. Tentando novamente...")
+            # Tenta com prompt mais curto
+            short_prompt = f"Implemente: {prompt_task}. Retorne JSON com 'files' (lista de objetos {{'path','content'}}) e 'run_cmd'."
+            plan = ask_llm(short_prompt)
+            if plan:
+                raw_files = plan.get("files", [])
+                files = normalize_files(raw_files)
+                if files:
+                    run_cmd = plan.get("run_cmd", None)
+                    test_cmd = plan.get("test_cmd", None)
+                    break
 
     if not files:
-        print("❌ A LLM não gerou planos válidos de arquivos. Encerrando.")
+        print("❌ Não foi possível obter um plano válido após 3 tentativas. Encerrando.")
         return False
 
-    # 4. Escrever Arquivos
-    print("3️⃣ [Code Engineer] Escrevendo arquivos gerados no disco...")
+    # 4. Escrever arquivos
+    print("4️⃣ [Code Engineer] Escrevendo arquivos...")
     for f in files:
-        target_path = os.path.join(project_path, f["path"])
-        ok_write, out, _ = run_skill("code_engineer.py", ["write", target_path, "--content", f["content"], "--overwrite"])
+        target_path = os.path.join(project_path, f.get("path", ""))
+        if not target_path:
+            print("   ⚠️ Arquivo sem 'path' ignorado.")
+            continue
+        content = f.get("content", "")
+        ok_write, _, _ = run_skill("code_engineer.py", ["write", target_path, "--content", content, "--overwrite"])
         print(f"  └─ {f['path']}: {'✅' if ok_write else '❌'}")
 
-    # 5. Loop de Validação e Auto-Correção (Self-Healing)
+    # 5. Validação
     if no_tests:
-        print("\n4️⃣ [Execution-Driven Healing] Validando por execução direta (sem unit tests)...")
+        print("\n5️⃣ [Execution-Driven Healing] Validando por execução direta...")
+        success = False
         for attempt in range(1, max_retries + 1):
             print(f"   🧪 Tentativa {attempt}/{max_retries} de execução...")
             runner_args = [project_path]
@@ -161,105 +228,95 @@ Retorne um JSON no seguinte formato estrito:
 
             ok_run, out_run, err_run = run_skill("code_runner.py", runner_args)
 
-            if ok_run:
-                print("   ✅ O programa executou com sucesso sem erros!")
-                if out_run:
-                    print(f"   📄 Output:\n{out_run}")
-                break
+            if not ok_run:
+                print("   ⚠️ Execução falhou. Auto-correção...")
+                error_logs = err_run if err_run else out_run
+                print(f"   ❌ Erro:\n{error_logs}")
 
-            print(f"   ⚠️ Execução falhou com erros! Ativando auto-correção via log de execução...")
-            error_logs = err_run if err_run else out_run
-            print(f"   ❌ Log de Erro:\n{error_logs}")
+                if detect_and_install_missing_module(error_logs):
+                    continue
 
-            # --- NOVIDADE: Detecção de módulo faltante ---
-            if detect_and_install_missing_module(error_logs):
-                # Se instalou, tenta executar novamente sem pedir correção de código
-                continue  # vai para a próxima tentativa com a dependência instalada
-
-            # Caso contrário, pede correção de código à LLM
-            fix_prompt = f"""
-O código gerado para a tarefa '{prompt_task}' falhou durante a execução com o comando '{run_cmd}'.
-Log de erro / Traceback:
+                fix_prompt = f"""
+Erro durante execução:
 {error_logs}
-
-Corrija o código para solucionar a falha e garantir que o programa execute do início ao fim sem erros. 
-Retorne um JSON estrito:
-{{
-  "files": [
-    {{
-      "path": "caminho/do/arquivo.py",
-      "content": "código corrigido"
-    }}
-  ]
-}}
+Corrija o código e retorne JSON com os arquivos corrigidos.
 """
-            fixes = ask_llm(fix_prompt)
-            for f in fixes.get("files", []):
-                target_path = os.path.join(project_path, f["path"])
-                run_skill("code_engineer.py", ["write", target_path, "--content", f["content"], "--overwrite"])
+                fixes = ask_llm(fix_prompt)
+                if fixes:
+                    raw_fixes = fixes.get("files", [])
+                    fixed_files = normalize_files(raw_fixes)
+                    for f in fixed_files:
+                        target_path = os.path.join(project_path, f.get("path", ""))
+                        if target_path:
+                            run_skill("code_engineer.py", ["write", target_path, "--content", f.get("content", ""), "--overwrite"])
+                continue
 
+            # Verifica saída significativa
+            if out_run and len(out_run) > 20:
+                print("   ✅ Executou com sucesso e gerou saída!")
+                print(f"   📄 Output:\n{out_run}")
+                success = True
+                break
+            else:
+                print("   ⚠️ Saída muito curta ou vazia. Corrigindo...")
+                fix_prompt = f"""
+Saída atual:
+{out_run if out_run else "(vazia)"}
+Reescreva o código para produzir saída útil conforme solicitado: {prompt_task}
+Retorne JSON com os arquivos corrigidos.
+"""
+                fixes = ask_llm(fix_prompt)
+                if fixes:
+                    raw_fixes = fixes.get("files", [])
+                    fixed_files = normalize_files(raw_fixes)
+                    for f in fixed_files:
+                        target_path = os.path.join(project_path, f.get("path", ""))
+                        if target_path:
+                            run_skill("code_engineer.py", ["write", target_path, "--content", f.get("content", ""), "--overwrite"])
+
+        if not success:
+            print("⚠️ A validação não obteve sucesso após várias tentativas, mas os arquivos foram gerados.")
     else:
-        print("\n4️⃣ [Code Checker] Rodando testes unitários e verificações...")
+        print("\n5️⃣ [Code Checker] Rodando testes...")
         for attempt in range(1, max_retries + 1):
             print(f"   🧪 Tentativa {attempt}/{max_retries} de validação...")
             ok_check, out_check, err_check = run_skill("code_checker.py", [project_path, "-c", test_cmd])
-
             if ok_check:
-                print("   ✅ Todos os testes passaram com sucesso!")
+                print("   ✅ Testes passaram!")
                 break
-
-            print(f"   ⚠️ Validação falhou! Ativando ciclo de auto-correção (Self-Healing)...")
+            print("   ⚠️ Testes falharam. Corrigindo...")
             error_logs = err_check if err_check else out_check
-
-            fix_prompt = f"""
-O código gerado para a tarefa '{prompt_task}' apresentou o seguinte erro de teste:
-{error_logs}
-
-Corrija o código para solucionar a falha. Retorne um JSON estrito:
-{{
-  "files": [
-    {{
-      "path": "src/nome_do_arquivo.py",
-      "content": "código corrigido"
-    }},
-    {{
-      "path": "tests/test_nome_do_arquivo.py",
-      "content": "código de teste corrigido herdando de unittest.TestCase"
-    }}
-  ]
-}}
-"""
+            fix_prompt = f"Testes falharam: {error_logs}. Corrija e retorne JSON com os arquivos."
             fixes = ask_llm(fix_prompt)
-            for f in fixes.get("files", []):
-                target_path = os.path.join(project_path, f["path"])
-                run_skill("code_engineer.py", ["write", target_path, "--content", f["content"], "--overwrite"])
+            if fixes:
+                raw_fixes = fixes.get("files", [])
+                fixed_files = normalize_files(raw_fixes)
+                for f in fixed_files:
+                    target_path = os.path.join(project_path, f.get("path", ""))
+                    if target_path:
+                        run_skill("code_engineer.py", ["write", target_path, "--content", f.get("content", ""), "--overwrite"])
 
-        # 6. Execução final do projeto quando usado modo com testes
-        print("\n5️⃣ [Code Runner] Executando o programa gerado...")
-        runner_args = [project_path]
-        if run_cmd:
-            runner_args.extend(["-c", run_cmd])
-        run_skill("code_runner.py", runner_args)
-
-    # 7. Commit das Alterações
-    print("\n6️⃣ [Git Commit] Registrando a solução no Git...")
+    # 6. Commit
+    print("\n6️⃣ [Git Commit] Registrando alterações...")
     commit_msg = f"feat: {prompt_task}"
     run_skill("git_guard.py", ["commit", project_path, "-m", commit_msg])
 
-    print("\n🎉 [AGENTE DE CÓDIGO CONCLUÍDO COM SUCESSO!]")
+    print("\n🎉 [AGENTE CONCLUÍDO]")
     return True
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Agente Autônomo de Código do Wygor Core")
-    parser.add_argument("task", help="Descrição em linguagem natural da tarefa")
-    parser.add_argument("-p", "--project", default="default", help="Nome do projeto no pgvector")
-    parser.add_argument("-r", "--repo", default=".", help="Caminho do repositório/workspace")
-    parser.add_argument("--no-tests", action="store_true", help="Ignora testes unitários e valida através de execução direta (Execution-Driven Healing)")
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("task", help="Descrição da tarefa")
+    parser.add_argument("-p", "--project", default="default")
+    parser.add_argument("-r", "--repo", default=".")
+    parser.add_argument("--no-tests", action="store_true")
+    parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
+
     run_agent_task(
-        args.task, 
-        project_path=args.repo, 
-        project_name=args.project, 
-        no_tests=args.no_tests
+        args.task,
+        project_path=args.repo,
+        project_name=args.project,
+        no_tests=args.no_tests,
+        verbose=args.verbose
     )

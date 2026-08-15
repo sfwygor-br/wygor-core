@@ -14,7 +14,7 @@ load_dotenv()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_EMBED_URL = f"{OLLAMA_BASE_URL}/api/embeddings"
-MODEL_LLM = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5-coder:3b")
+MODEL_LLM = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5-coder:14b")
 MODEL_EMBED = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 # Configurações Postgres

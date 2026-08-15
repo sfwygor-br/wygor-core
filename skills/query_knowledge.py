@@ -39,6 +39,12 @@ def search_documents(query_text, project_name=None, limit=5, raw_mode=False):
         print("❌ Falha ao gerar embedding de busca.", file=sys.stderr)
         return
 
+    # Tratamento para suporte a múltiplos projetos e busca global ('all', '*', None)
+    if not project_name or project_name.lower() in ["all", "*", "global"]:
+        projects_list = None
+    else:
+        projects_list = [p.strip() for p in project_name.split(",") if p.strip()]
+
     conn = psycopg2.connect(
         host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS
     )
@@ -46,19 +52,19 @@ def search_documents(query_text, project_name=None, limit=5, raw_mode=False):
 
     sql = """
     WITH vector_search AS (
-        SELECT id, file_path, content,
+        SELECT id, project_name, file_path, content,
                ROW_NUMBER() OVER (ORDER BY embedding <=> %s::vector ASC) as vec_rank,
                (embedding <=> %s::vector) as distance
         FROM document_chunks
-        WHERE (%s::text IS NULL OR project_name = %s)
+        WHERE (%s::text[] IS NULL OR project_name = ANY(%s::text[]))
         ORDER BY vec_rank
         LIMIT 20
     ),
     text_search AS (
-        SELECT id, file_path, content,
+        SELECT id, project_name, file_path, content,
                ROW_NUMBER() OVER (ORDER BY ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english', %s)) DESC) as text_rank
         FROM document_chunks
-        WHERE (%s::text IS NULL OR project_name = %s)
+        WHERE (%s::text[] IS NULL OR project_name = ANY(%s::text[]))
           AND to_tsvector('english', content) @@ plainto_tsquery('english', %s)
         ORDER BY text_rank
         LIMIT 20
@@ -66,7 +72,8 @@ def search_documents(query_text, project_name=None, limit=5, raw_mode=False):
     SELECT 
         COALESCE(v.file_path, t.file_path) as file_path,
         COALESCE(v.content, t.content) as content,
-        (COALESCE(1.0 / (60 + v.vec_rank), 0.0) + COALESCE(1.0 / (60 + t.text_rank), 0.0)) as rrf_score
+        (COALESCE(1.0 / (60 + v.vec_rank), 0.0) + COALESCE(1.0 / (60 + t.text_rank), 0.0)) as rrf_score,
+        COALESCE(v.project_name, t.project_name) as project_name
     FROM vector_search v
     FULL OUTER JOIN text_search t ON v.id = t.id
     ORDER BY rrf_score DESC
@@ -74,8 +81,8 @@ def search_documents(query_text, project_name=None, limit=5, raw_mode=False):
     """
 
     cur.execute(sql, (
-        query_vector, query_vector, project_name, project_name,
-        query_text, project_name, project_name, query_text,
+        query_vector, query_vector, projects_list, projects_list,
+        query_text, projects_list, projects_list, query_text,
         limit
     ))
 
@@ -89,19 +96,20 @@ def search_documents(query_text, project_name=None, limit=5, raw_mode=False):
 
     if raw_mode:
         for row in results:
-            print(f"--- [Arquivo: {row[0]}] ---")
+            print(f"--- [Projeto: {row[3]} | Arquivo: {row[0]}] ---")
             print(row[1])
             print()
     else:
-        print(f"🔍 Busca Híbrida (RRF) para: '{query_text}' (Projeto: {project_name or 'TODOS'}):\n")
+        proj_str = ",".join(projects_list) if projects_list else "TODOS"
+        print(f"🔍 Busca Híbrida (RRF) para: '{query_text}' (Projetos: {proj_str}):\n")
         for idx, row in enumerate(results, 1):
-            print(f"[{idx}] 📁 {row[0]} (Relevância RRF: {row[2]:.4f})")
+            print(f"[{idx}] 📁 [{row[3]}] {row[0]} (Relevância RRF: {row[2]:.4f})")
             print(f"    {row[1][:300]}...\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Consulta RAG Híbrida no Wygor")
     parser.add_argument("query", help="Texto de busca")
-    parser.add_argument("-p", "--project", default=None, help="Nome do projeto")
+    parser.add_argument("-p", "--project", default=None, help="Nome do projeto (ou múltiplos separados por vírgula / 'all')")
     parser.add_argument("-l", "--limit", type=int, default=5, help="Quantidade de resultados")
     parser.add_argument("--raw", action="store_true", help="Retorna conteúdo limpo")
 
