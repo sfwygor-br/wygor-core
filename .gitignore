@@ -1,0 +1,12 @@
+# Ambientes virtuais Python
+.venv/
+env/
+venv/
+__pycache__/
+*.pyc
+
+# Configurações locais e segredos
+.env
+
+# Logs e traces locais
+memory/execution_trace.jsonl
