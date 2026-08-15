@@ -23,6 +23,9 @@ Uso:
   wygor check <path> [-c "<comando>"]   Executa linters e suíte de testes no projeto
   wygor manual [SEÇÃO]                  Exibe o manual de instruções e engenharia
   wygor chat                            Abre o chat interativo (Stateful + Multi-Projeto)
+  wygor telemetry [collect|list|clear] [--unit U] [--minutes N]  Coleta telemetria do sistema
+  wygor telclassify [--window-hours N] Classifica e vetoriza logs em system_telemetry (RAG)
+  wygor native run -c "<cmd>" | native check | native history  Executa pipeline Bash nativo auto-healing
   wygor help                            Exibe esta ajuda
 """)
 
@@ -88,6 +91,20 @@ def main():
     elif cmd == "chat":
         script = os.path.join(SCRIPT_DIR, "skills/chat.py")
         subprocess.run([sys.executable, script] + args)
+    elif cmd == "telemetry":
+        # Observabilidade externa nao-invasiva (Spec 002): collect | list | clear
+        sub_action = args[0] if len(args) > 0 and args[0] in ("collect", "list", "clear") else "collect"
+        script = os.path.join(SCRIPT_DIR, "skills/telemetry_collector.py")
+        subprocess.run([sys.executable, script, sub_action] + args[1:])
+    elif cmd == "telclassify":
+        # Classifica e vetoriza logs de telemetria no escopo system_telemetry (Spec 002)
+        script = os.path.join(SCRIPT_DIR, "skills/telemetry_classify.py")
+        subprocess.run([sys.executable, script] + args)
+    elif cmd == "native":
+        # Executor nativo de sistema: pipelines bash com auto-healing (Spec 002)
+        sub_action = args[0] if len(args) > 0 and args[0] in ("run", "check", "history") else "run"
+        script = os.path.join(SCRIPT_DIR, "skills/native_workflow.py")
+        subprocess.run([sys.executable, script, sub_action] + args[1:])
     elif cmd in ("status", "info"):
         script = os.path.join(SCRIPT_DIR, "skills/db_migrate.py")
         subprocess.run([sys.executable, script, "--status"])

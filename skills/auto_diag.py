@@ -37,6 +37,8 @@ DB_NAME = os.getenv("DB_NAME", "postgres")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASS = os.getenv("DB_PASS", "root")
 
+
+
 def check_gpu():
     """Verifica presença, VRAM e utilização da GPU via nvidia-smi."""
     try:
@@ -180,6 +182,10 @@ def run_diagnostics(save=True, raw=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Skill de Autodiagnóstico e Telemetria Wygor Core")
+    # Ignora a action enviada pelo roteador (ex: list, run)
+    parser.add_argument("action", nargs="?", default="run", help="Ação a ser executada")
+    # Aceita o parâmetro de projeto injetado pelo chat.py
+    parser.add_argument("-p", "--project", default="default", help="Nome do projeto ativo")
     parser.add_argument("--no-save", action="store_true", help="Executa sem salvar no banco de dados")
     parser.add_argument("--raw", action="store_true", help="Saída em formato JSON puro")
 
