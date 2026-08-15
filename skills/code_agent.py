@@ -15,19 +15,11 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").split('/api'
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "qwen2.5-coder:3b")
 
-def run_skill(script_name, args_list):
-    """Executa uma skill local e captura o resultado."""
-    script_path = os.path.join(SCRIPT_DIR, script_name)
-    try:
-        res = subprocess.run(
-            [sys.executable, script_path] + args_list,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        return res.returncode == 0, res.stdout.strip() if res.stdout else "", res.stderr.strip() if res.stderr else ""
-    except Exception as e:
-        return False, "", str(e)
+def sanitize_for_json(text):
+    if not text:
+        return ""
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    return text
 
 def ask_llm(prompt, system_prompt="Você é um engenheiro de software especialista em automação."):
     """Consulta o Ollama e extrai o bloco JSON com resiliência."""
@@ -49,15 +41,45 @@ def ask_llm(prompt, system_prompt="Você é um engenheiro de software especialis
         with urllib.request.urlopen(req) as response:
             res = json.loads(response.read().decode("utf-8"))
             raw_response = res.get("response", "")
-            
-            # Tenta extrair o bloco JSON da resposta
+            # Sanitiza
+            raw_response = sanitize_for_json(raw_response)
+            # Tenta extrair bloco JSON
             json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group(0))
-            return json.loads(raw_response)
+                return json.loads(json_match.group(0), strict=False)
+            return json.loads(raw_response, strict=False)
     except Exception as e:
         print(f"❌ Erro ao comunicar com Ollama: {e}", file=sys.stderr)
         return {}
+
+def run_skill(script_name, args_list):
+    """Executa uma skill local e captura o resultado."""
+    script_path = os.path.join(SCRIPT_DIR, script_name)
+    try:
+        res = subprocess.run(
+            [sys.executable, script_path] + args_list,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        return res.returncode == 0, res.stdout.strip() if res.stdout else "", res.stderr.strip() if res.stderr else ""
+    except Exception as e:
+        return False, "", str(e)
+
+def detect_and_install_missing_module(error_log):
+    """Verifica se o erro contém ModuleNotFoundError e tenta instalar o pacote."""
+    match = re.search(r"ModuleNotFoundError: No module named '(\w+)'", error_log)
+    if match:
+        module = match.group(1)
+        print(f"   📦 Instalando dependência faltante: {module}...")
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", module], check=True, capture_output=True)
+            print(f"   ✅ Pacote '{module}' instalado com sucesso.")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"   ❌ Falha ao instalar '{module}': {e.stderr.decode() if e.stderr else ''}")
+            return False
+    return False
 
 def run_agent_task(prompt_task, project_path=".", project_name="default", max_retries=3, no_tests=False):
     print(f"\n🤖 [WYGOR CODE AGENT] Processando solicitação: '{prompt_task}'\n")
@@ -149,6 +171,12 @@ Retorne um JSON no seguinte formato estrito:
             error_logs = err_run if err_run else out_run
             print(f"   ❌ Log de Erro:\n{error_logs}")
 
+            # --- NOVIDADE: Detecção de módulo faltante ---
+            if detect_and_install_missing_module(error_logs):
+                # Se instalou, tenta executar novamente sem pedir correção de código
+                continue  # vai para a próxima tentativa com a dependência instalada
+
+            # Caso contrário, pede correção de código à LLM
             fix_prompt = f"""
 O código gerado para a tarefa '{prompt_task}' falhou durante a execução com o comando '{run_cmd}'.
 Log de erro / Traceback:

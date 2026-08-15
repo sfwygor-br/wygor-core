@@ -16,6 +16,25 @@ OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "qwen2.5-coder:3b")
 
+def sanitize_for_json(text):
+    """Remove caracteres de controle que quebram JSON, mantendo apenas texto UTF-8 limpo."""
+    if not text:
+        return ""
+    # Remove caracteres de controle (exceto \n, \r, \t) e escapa aspas
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    # Substitui múltiplas quebras de linha por uma única para resumir
+    return text
+
+def summarize_log(text, max_lines=20):
+    """Resume logs longos para evitar estouro de contexto."""
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    # Mantém as primeiras 10 e últimas 10 linhas
+    return "\n".join(lines[:10] + ["... (linhas suprimidas) ..."] + lines[-10:])
+
 def run_skill(script_name, args_list, capture_output=True):
     """Executa uma skill local e retorna o resultado e código de saída."""
     script_path = os.path.join(SCRIPT_DIR, script_name)
@@ -93,19 +112,38 @@ Retorne APENAS um JSON válido no seguinte formato:
         with urllib.request.urlopen(req) as response:
             res = json.loads(response.read().decode("utf-8"))
             raw = res.get("response", "")
+            # Tenta extrair o primeiro bloco JSON usando regex
             json_match = re.search(r'\{.*\}', raw, re.DOTALL)
-            parsed = json.loads(json_match.group(0)) if json_match else json.loads(raw)
+            if json_match:
+                raw_json = json_match.group(0)
+                # Sanitiza caracteres de controle
+                raw_json = sanitize_for_json(raw_json)
+                parsed = json.loads(raw_json, strict=False)
+            else:
+                parsed = json.loads(raw, strict=False)
             if verbose:
                 print(f"\n💬 [Raciocínio - Decisão do Roteador]:\n{json.dumps(parsed, indent=2, ensure_ascii=False)}\n")
             return parsed
-    except Exception:
+    except Exception as e:
+        if verbose:
+            print(f"⚠️ Erro no roteador: {e}. Assumindo 'chat'.")
         return {"intent": "chat"}
 
 def send_chat_message(messages):
     """Envia o histórico de chat direto para o Ollama."""
+    # Sanitiza todas as mensagens antes de enviar
+    sanitized = []
+    for msg in messages:
+        content = msg.get("content", "")
+        content = sanitize_for_json(content)
+        # Resumir conteúdo do sistema se for muito longo (>= 1000 caracteres)
+        if msg.get("role") == "system" and len(content) > 1000:
+            content = summarize_log(content, max_lines=15)
+        sanitized.append({"role": msg["role"], "content": content})
+    
     payload = {
         "model": CHAT_MODEL,
-        "messages": messages,
+        "messages": sanitized,
         "stream": False
     }
     req = urllib.request.Request(
@@ -164,9 +202,11 @@ def start_interactive_chat(project_name="default", initial_verbose=False):
                 ok, out, err = run_skill("ingest_docs.py", args, capture_output=False)
                 active_project = proj
                 
-                # Alimenta o histórico do chat
+                # Resumir logs para evitar poluição
+                out_sum = summarize_log(out, 10) if out else ""
+                err_sum = summarize_log(err, 10) if err else ""
                 messages.append({"role": "user", "content": user_input})
-                messages.append({"role": "system", "content": f"Ação 'ingest' executada. Status: {'Sucesso' if ok else 'Falha'}. Saída: {out}\n{err}"})
+                messages.append({"role": "system", "content": f"Ação 'ingest' executada. Status: {'Sucesso' if ok else 'Falha'}. Saída: {out_sum}\n{err_sum}"})
                 print(f"\n✅ Mapeamento concluído para o projeto [{active_project}]!\n")
 
             elif intent == "query":
@@ -197,9 +237,11 @@ def start_interactive_chat(project_name="default", initial_verbose=False):
                     args.extend(["-c", cmd])
                 ok, out, err = run_skill("code_runner.py", args, capture_output=False)
                 
-                # Alimenta o histórico do chat para ele ter memória da execução!
+                # Resumir logs
+                out_sum = summarize_log(out, 20) if out else ""
+                err_sum = summarize_log(err, 20) if err else ""
                 messages.append({"role": "user", "content": user_input})
-                messages.append({"role": "system", "content": f"Ação 'run_code' executada em {proj_path}. Status: {'Sucesso' if ok else 'Falha'}.\nSTDOUT:\n{out}\nSTDERR:\n{err}"})
+                messages.append({"role": "system", "content": f"Ação 'run_code' executada em {proj_path}. Status: {'Sucesso' if ok else 'Falha'}.\nSTDOUT:\n{out_sum}\nSTDERR:\n{err_sum}"})
                 print()
 
             elif intent == "code_task":
@@ -218,9 +260,11 @@ def start_interactive_chat(project_name="default", initial_verbose=False):
                 
                 ok, out, err = run_skill("code_agent.py", agent_args, capture_output=False)
                 
-                # Alimenta o histórico com o resultado do agente
+                # Resumir logs
+                out_sum = summarize_log(out, 20) if out else ""
+                err_sum = summarize_log(err, 20) if err else ""
                 messages.append({"role": "user", "content": user_input})
-                messages.append({"role": "system", "content": f"Ação 'code_task' concluída. Tarefa: '{task}'. Status: {'Sucesso' if ok else 'Falha'}.\nResultado:\n{out}\n{err}"})
+                messages.append({"role": "system", "content": f"Ação 'code_task' concluída. Tarefa: '{task}'. Status: {'Sucesso' if ok else 'Falha'}.\nResultado:\n{out_sum}\n{err_sum}"})
                 print()
 
             else:
