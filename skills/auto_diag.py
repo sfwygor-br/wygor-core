@@ -14,7 +14,6 @@ import platform
 import argparse
 import urllib.request
 import subprocess
-#import psycopg2
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,7 +35,6 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "postgres")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASS = os.getenv("DB_PASS", "root")
-
 
 
 def check_gpu():
@@ -68,7 +66,7 @@ def check_ollama_status():
     start_t = time.time()
     try:
         req = urllib.request.Request(OLLAMA_TAGS_URL)
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             latency_ms = round((time.time() - start_t) * 1000, 2)
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -96,7 +94,6 @@ def collect_telemetry():
         "cpu_count": os.cpu_count() or 1
     }
 
-    # Critério de transbordo: se não houver GPU e a latência do Ollama for > 300ms, recomenda CLOUD
     needs_cloud = (not gpu_info["available"]) and (ollama_info["latency_ms"] > 300 or ollama_info["status"] != "online")
     recommended_tier = "cloud" if needs_cloud else "local"
 
@@ -117,7 +114,7 @@ def get_embedding(text):
         headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             res = json.loads(response.read().decode("utf-8"))
             return res.get("embedding", [])
     except Exception:
@@ -145,17 +142,14 @@ def save_to_pgvector(telemetry):
         conn = psycopg2.connect(
             host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS
         )
-        cur = conn.cursor()
-
-        sql = """
-        INSERT INTO document_chunks (project_name, file_path, content, embedding)
-        VALUES (%s, %s, %s, %s::vector);
-        """
-        file_path = f"telemetry_{telemetry['system']['hostname']}.json"
-        
-        cur.execute(sql, ("system_telemetry", file_path, content_str, vec if vec else None))
-        conn.commit()
-        cur.close()
+        with conn:
+            with conn.cursor() as cur:
+                sql = """
+                INSERT INTO document_chunks (project_name, file_path, content, embedding)
+                VALUES (%s, %s, %s, %s::vector);
+                """
+                file_path = f"telemetry_{telemetry['system']['hostname']}.json"
+                cur.execute(sql, ("system_telemetry", file_path, content_str, vec if vec else None))
         conn.close()
         return True
     except Exception as e:
@@ -182,9 +176,7 @@ def run_diagnostics(save=True, raw=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Skill de Autodiagnóstico e Telemetria Wygor Core")
-    # Ignora a action enviada pelo roteador (ex: list, run)
     parser.add_argument("action", nargs="?", default="run", help="Ação a ser executada")
-    # Aceita o parâmetro de projeto injetado pelo chat.py
     parser.add_argument("-p", "--project", default="default", help="Nome do projeto ativo")
     parser.add_argument("--no-save", action="store_true", help="Executa sem salvar no banco de dados")
     parser.add_argument("--raw", action="store_true", help="Saída em formato JSON puro")

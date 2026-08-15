@@ -1,28 +1,40 @@
-#!/usr/bin/env python3
+# app.py
 import sys
 import requests
-from psycopg2 import connect, OperationalError
+import psycopg2
+from psycopg2 import sql
 
-def check_database_connection():
+
+def get_db_connection():
     try:
-        conn = connect(
-            dbname='postgres',
-            user='postgres',
-            password='root',
+        conn = psycopg2.connect(
             host='127.0.0.1',
-            port='5432'
+            database='postgres',
+            user='postgres',
+            password='root'
         )
-        print("Database connection successful.")
-        conn.close()
-    except OperationalError as e:
-        print(f"Failed to connect to the database: {e}")
+        return conn
+    except Exception as e:
+        print(f'Erro ao conectar ao banco de dados: {e}')
         sys.exit(1)
 
-def auto_heal():
-    # Placeholder for auto-healing logic
-    print("Performing auto-healing...")
-    # Example: Re-run setup scripts or restart services
+def check_database_extension(conn):
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT 1 FROM pg_available_extensions WHERE name = 'pgvector';")
+        extension_exists = cur.fetchone()
+        if not extension_exists:
+            print('Extenso pgvector no est disponvel.')
+            sys.exit(1)
+    finally:
+        cur.close()
 
-if __name__ == "__main__":
-    check_database_connection()
-    auto_heal()
+def main():
+    conn = get_db_connection()
+    check_database_extension(conn)
+    # Adicionar lgica de auto-healing e ingesto aqui
+    conn.close()
+    print('Anlise concluda com sucesso.')
+
+if __name__ == '__main__':
+    main()

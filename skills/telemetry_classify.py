@@ -32,6 +32,9 @@ DB_NAME = os.getenv("DB_NAME", "postgres")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASS = os.getenv("DB_PASS", "root")
 
+OLLAMA_GENERATE_URL = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/generate"
+CLASSIFY_MODEL = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5-coder:1.5b")
+
 
 def get_connection():
     try:
@@ -83,49 +86,52 @@ def classify(project="default", window_hours=24, raw=False):
         print("Nenhum evento de telemetria encontrado no escopo system_telemetry para classificar.")
         return True
 
-    conn = get_connection()
-    if not conn:
-        return False
-    cur = conn.cursor()
-
+    # NÃO abra a conexão conn aqui fora do loop!
     classified = 0
+
     for event_id, severity, signature, raw_message in rows:
-        # Usa classificacao via LLM como triagem inteligente, com fallback p/ heuristica
+        # 1. Processamento pesado da LLM/Embedding é feito FORA de qualquer transação de banco
         llm = llm_classify(raw_message or "", signature or "")
         llm_sev = (llm.get("severity") or severity).lower()
         llm_sig = llm.get("signature") or signature or ""
         content = f"TELEMETRIA [{llm_sev}] {llm_sig}\n{raw_message or ''}"
+
         vector = get_embedding(content)
         if not vector:
             continue
+
         file_path = f"system_telemetry://{project}/event-{event_id}"
+
+        # 2. Abre a conexão, insere e faz COMMIT IMEDIATO por item
+        conn = get_connection()
+        if not conn:
+            continue
+
         try:
-            cur.execute("""
-                INSERT INTO document_chunks (project_name, file_path, chunk_index, content, embedding, file_hash, updated_at)
-                SELECT 'system_telemetry', %s, 0, %s, %s::vector,
-                       md5(%s), CURRENT_TIMESTAMP
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM document_chunks
-                    WHERE project_name='system_telemetry' AND file_path=%s AND content=%s
-                );
-            """, (file_path, content, vector, content, file_path, content))
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO document_chunks (project_name, file_path, chunk_index, content, embedding, file_hash, updated_at)
+                        SELECT 'system_telemetry', %s, 0, %s, %s::vector,
+                               md5(%s), CURRENT_TIMESTAMP
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM document_chunks
+                            WHERE project_name='system_telemetry' AND file_path=%s AND content=%s
+                        );
+                    """, (file_path, content, vector, content, file_path, content))
             classified += 1
         except Exception as e:
             if "UndefinedTable" in str(e) or "does not exist" in str(e):
                 print("ERR_MISSING_TABLE: Tabela 'document_chunks' ausente.", file=sys.stderr)
-                cur.close(); conn.close(); sys.exit(1)
-            conn.rollback()
-            print(f"ERRO vetorizar: {e}", file=sys.stderr)
-
-    conn.commit()
-    cur.close(); conn.close()
+                conn.close()
+                sys.exit(1)
+            print(f"ERRO vetorizar evento {event_id}: {e}", file=sys.stderr)
+        finally:
+            conn.close()  # Garante que a conexão fecha a cada iteração
 
     print(f"Telemetria classificada e vetorizada em system_telemetry: {classified} eventos.")
     return True
 
-
-OLLAMA_GENERATE_URL = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/generate"
-CLASSIFY_MODEL = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5-coder:1.5b")
 
 
 def _load_classify_prompt(log_content):
