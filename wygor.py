@@ -11,6 +11,7 @@ def print_help():
 
 Uso:
   wygor agent "<instrução>" [-p PROJETO] -r <path>  Executa tarefa de código 100% autônoma
+  wygor cron [AGENTE] [-p PROJETO] [-t "<task>"]    Executa ciclo de agente autônomo com persistência
   wygor migrate                         Executa as migrações pendentes do banco
   wygor search "<query>" [-p PROJETO]   Busca contexto RAG Híbrido (Vector + Keyword)
   wygor ingest <caminho> [-p PROJETO]   Ingestão incremental de repositórios / pastas
@@ -22,7 +23,7 @@ Uso:
   wygor code patch <file> --old "" --new "" Modificar um trecho do código existente
   wygor check <path> [-c "<comando>"]   Executa linters e suíte de testes no projeto
   wygor manual [SEÇÃO]                  Exibe o manual de instruções e engenharia
-  wygor chat                            Abre o chat interativo (Stateful + Multi-Projeto)
+  wygor chat [-p PROJETO]               Abre o chat interativo (Stateful + Multi-Projeto)
   wygor telemetry [collect|list|clear] [--unit U] [--minutes N]  Coleta telemetria do sistema
   wygor telclassify [--window-hours N] Classifica e vetoriza logs em system_telemetry (RAG)
   wygor native run -c "<cmd>" | native check | native history  Executa pipeline Bash nativo auto-healing
@@ -61,6 +62,9 @@ def main():
     if cmd == "agent":
         script = os.path.join(SCRIPT_DIR, "skills/code_agent.py")
         subprocess.run([sys.executable, script] + args)
+    elif cmd == "cron":
+        script = os.path.join(SCRIPT_DIR, "skills/cron_agent.py")
+        subprocess.run([sys.executable, script] + args)
     elif cmd == "migrate":
         script = os.path.join(SCRIPT_DIR, "skills/db_migrate.py")
         subprocess.run([sys.executable, script] + args)
@@ -92,16 +96,13 @@ def main():
         script = os.path.join(SCRIPT_DIR, "skills/chat.py")
         subprocess.run([sys.executable, script] + args)
     elif cmd == "telemetry":
-        # Observabilidade externa nao-invasiva (Spec 002): collect | list | clear
         sub_action = args[0] if len(args) > 0 and args[0] in ("collect", "list", "clear") else "collect"
         script = os.path.join(SCRIPT_DIR, "skills/telemetry_collector.py")
         subprocess.run([sys.executable, script, sub_action] + args[1:])
     elif cmd == "telclassify":
-        # Classifica e vetoriza logs de telemetria no escopo system_telemetry (Spec 002)
         script = os.path.join(SCRIPT_DIR, "skills/telemetry_classify.py")
         subprocess.run([sys.executable, script] + args)
     elif cmd == "native":
-        # Executor nativo de sistema: pipelines bash com auto-healing (Spec 002)
         sub_action = args[0] if len(args) > 0 and args[0] in ("run", "check", "history") else "run"
         script = os.path.join(SCRIPT_DIR, "skills/native_workflow.py")
         subprocess.run([sys.executable, script, sub_action] + args[1:])

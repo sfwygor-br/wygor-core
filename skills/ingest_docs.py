@@ -46,7 +46,7 @@ def calculate_file_hash(filepath):
         return None
 
 def get_embedding(text):
-    """Gera embeddings no Ollama garantindo limite de tamanho."""
+    """Gera embeddings no Ollama garantindo limite de tamanho e timeout."""
     payload = {"model": EMBED_MODEL, "prompt": text[:4000]}
     req = urllib.request.Request(
         OLLAMA_EMBED_URL,
@@ -54,7 +54,7 @@ def get_embedding(text):
         headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             res = json.loads(response.read().decode("utf-8"))
             return res.get("embedding", [])
     except Exception as e:
@@ -102,7 +102,6 @@ def run_ingestion(target_path, project_name, clean_reindex=False):
         cur.execute("DELETE FROM document_chunks WHERE project_name = %s;", (project_name,))
         conn.commit()
 
-    # Busca hashes atuais gravados no banco para o projeto
     cur.execute(
         "SELECT file_path, file_hash FROM document_chunks WHERE project_name = %s GROUP BY file_path, file_hash;",
         (project_name,)
@@ -130,7 +129,6 @@ def run_ingestion(target_path, project_name, clean_reindex=False):
                 if not file_hash:
                     continue
 
-                # Se o arquivo não mudou, pula o processamento de embeddings
                 if rel_path in db_file_hashes and db_file_hashes[rel_path] == file_hash:
                     skipped_count += 1
                     continue
@@ -142,7 +140,6 @@ def run_ingestion(target_path, project_name, clean_reindex=False):
                     if not content.strip():
                         continue
 
-                    # Se já existia e o hash mudou, remove os chunks antigos antes de atualizar
                     if rel_path in db_file_hashes:
                         cur.execute(
                             "DELETE FROM document_chunks WHERE project_name = %s AND file_path = %s;",
@@ -179,7 +176,6 @@ def run_ingestion(target_path, project_name, clean_reindex=False):
                 except Exception as e:
                     print(f"  ⚠️ Erro ao ler arquivo {file_path}: {e}")
 
-    # Limpeza de arquivos deletados no disco
     deleted_files = set(db_file_hashes.keys()) - disk_files
     deleted_count = len(deleted_files)
 
