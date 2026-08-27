@@ -79,6 +79,24 @@ def run_skill(script_name, args_list):
     except Exception as e:
         return False, "", str(e)
 
+def run_in_workspace(project_path, command, timeout=60):
+    """Executa um comando dentro do workspace do projeto (substitui code_runner.py arquivado)."""
+    try:
+        res = subprocess.run(
+            command,
+            shell=True,
+            cwd=project_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout
+        )
+        return res.returncode == 0, res.stdout.strip(), res.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return False, "", f"Timeout após {timeout}s"
+    except Exception as e:
+        return False, "", str(e)
+
 def detect_and_install_missing_module(error_log):
     match = re.search(r"ModuleNotFoundError: No module named '(\w+)'", error_log)
     if match:
@@ -227,11 +245,10 @@ Retorne JSON estrito com:
         success = False
         for attempt in range(1, max_retries + 1):
             print(f"   🧪 Tentativa {attempt}/{max_retries} de execução...")
-            runner_args = [project_path]
             if run_cmd:
-                runner_args.extend(["-c", run_cmd])
-
-            ok_run, out_run, err_run = run_skill("code_runner.py", runner_args)
+                ok_run, out_run, err_run = run_in_workspace(project_path, run_cmd)
+            else:
+                ok_run, out_run, err_run = (os.path.isdir(project_path), "", "")
 
             if not ok_run:
                 print("   ⚠️ Execução falhou. Auto-correção...")
