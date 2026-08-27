@@ -8,6 +8,7 @@ import sys
 import json
 import socket
 import argparse
+import subprocess
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -17,9 +18,9 @@ from utils.db_service import execute_query
 
 SKILL_MANIFEST = {
     "intent": "ssh_manager",
-    "description": "Gerencia perfis de conexão SSH no banco de dados (CRUD). Permite cadastrar, listar, remover e testar conexões de servidores.",
-    "keywords": ["cadastrar ssh", "adicionar servidor", "listar ssh", "listar hosts", "remover host", "perfil ssh", "testar conexao ssh", "conexoes ssh"],
-    "allowed_actions": ["add", "list", "remove", "test"],
+    "description": "Gerencia perfis de conexão SSH no banco (CRUD) e executa comandos/deploys via ssh e rsync nativos.",
+    "keywords": ["cadastrar ssh", "adicionar servidor", "listar ssh", "listar hosts", "remover host", "perfil ssh", "testar conexao ssh", "conexoes ssh", "executar ssh", "rodar comando remoto", "deploy", "rsync", "sincronizar"],
+    "allowed_actions": ["add", "list", "remove", "test", "exec", "sync"],
     "script": "skills/ssh_manager.py"
 }
 
@@ -117,6 +118,94 @@ def test_connectivity(project, name):
     finally:
         sock.close()
 
+def _build_ssh_base(host, port, username, auth_type, key_path, secret_data):
+    """Monta a base do comando ssh nativo a partir do perfil salvo no banco."""
+    base = ["ssh", "-p", str(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new"]
+    if auth_type == "key_path" and key_path:
+        base += ["-i", os.path.expanduser(key_path)]
+    elif auth_type == "key_content" and secret_data:
+        print("⚠️ auth_type 'key_content' exige arquivo de chave; use 'key_path'.", file=sys.stderr)
+        return None
+    elif auth_type == "password":
+        print("⚠️ Autenticação por senha exige 'sshpass'; recomendado usar chave SSH.", file=sys.stderr)
+        return None
+    base.append(f"{username}@{host}")
+    return base
+
+
+def exec_command(project, name, command, timeout=60):
+    """Executa um comando remoto usando o binário ssh nativo + perfil salvo no banco."""
+    try:
+        row = execute_query(
+            "SELECT host, port, username, auth_type, key_path, secret_data FROM ssh_hosts WHERE project_name = %s AND name = %s;",
+            (project, name), commit=False, fetch="one")
+    except Exception as e:
+        print(f"❌ Erro ao buscar perfil SSH: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not row:
+        print(f"❌ Perfil '{name}' não encontrado no projeto [{project}].", file=sys.stderr)
+        sys.exit(1)
+
+    host, port, username, auth_type, key_path, secret_data = row
+    base = _build_ssh_base(host, port, username, auth_type, key_path, secret_data)
+    if base is None:
+        sys.exit(1)
+
+    print(f"🔌 Executando em {username}@{host}:{port} -> {command}")
+    try:
+        result = subprocess.run(base + [command], capture_output=True, text=True, timeout=timeout)
+        if result.stdout:
+            print(result.stdout.rstrip())
+        if result.stderr:
+            print(result.stderr.rstrip(), file=sys.stderr)
+        print(f"exit={result.returncode}")
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        print(f"❌ Timeout após {timeout}s executando comando remoto.", file=sys.stderr)
+        return 124
+    except FileNotFoundError:
+        print("❌ Binário 'ssh' não encontrado no sistema.", file=sys.stderr)
+        return 127
+
+
+def sync_files(project, name, src, dest, timeout=300):
+    """Deploy/sincronização de arquivos locais para o host remoto via rsync nativo."""
+    try:
+        row = execute_query(
+            "SELECT host, port, username, auth_type, key_path FROM ssh_hosts WHERE project_name = %s AND name = %s;",
+            (project, name), commit=False, fetch="one")
+    except Exception as e:
+        print(f"❌ Erro ao buscar perfil SSH: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not row:
+        print(f"❌ Perfil '{name}' não encontrado no projeto [{project}].", file=sys.stderr)
+        sys.exit(1)
+
+    host, port, username, auth_type, key_path = row
+    if auth_type != "key_path" or not key_path:
+        print("⚠️ sync exige autenticação por chave (key_path).", file=sys.stderr)
+        sys.exit(1)
+
+    ssh_cmd = (f"ssh -p {port} -i {os.path.expanduser(key_path)} "
+               f"-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new")
+    cmd = ["rsync", "-avz", "--partial", "-e", ssh_cmd, src, f"{username}@{host}:{dest}"]
+    print(f"📦 rsync {src} -> {username}@{host}:{dest}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.stdout:
+            print(result.stdout.rstrip())
+        if result.stderr:
+            print(result.stderr.rstrip(), file=sys.stderr)
+        print(f"exit={result.returncode}")
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        print(f"❌ Timeout após {timeout}s no rsync.", file=sys.stderr)
+        return 124
+    except FileNotFoundError:
+        print("❌ Binário 'rsync' não encontrado no sistema.", file=sys.stderr)
+        return 127
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Skill de Gerenciamento de SSH")
     parser.add_argument("action", nargs="?", default="list")
@@ -130,6 +219,9 @@ if __name__ == "__main__":
     parser.add_argument("--secret", help="Senha ou conteúdo da chave")
     parser.add_argument("--description", help="Descrição do servidor")
     parser.add_argument("--raw", action="store_true")
+    parser.add_argument("-c", "--command", help="Comando remoto a executar (ação exec)")
+    parser.add_argument("--src", help="Origem local para rsync (ação sync)")
+    parser.add_argument("--dest", help="Destino remoto para rsync (ação sync)")
 
     args = parser.parse_args()
     
@@ -138,7 +230,9 @@ if __name__ == "__main__":
         "add": "add", "adicionar": "add", "cadastrar": "add",
         "list": "list", "listar": "list", "sessoes": "list", "hosts": "list",
         "remove": "remove", "remover": "remove", "deletar": "remove",
-        "test": "test", "testar": "test"
+        "test": "test", "testar": "test",
+        "exec": "exec", "run": "exec", "execute": "exec", "rodar": "exec", "comando": "exec",
+        "sync": "sync", "rsync": "sync", "deploy": "sync", "enviar": "sync"
     }
     action = action_map.get((args.action or "list").lower(), "list")
 
@@ -159,3 +253,13 @@ if __name__ == "__main__":
             print("❌ Parâmetro '--name' é obrigatório para a ação 'test'.", file=sys.stderr)
             sys.exit(1)
         test_connectivity(args.project, args.name)
+    elif action == "exec":
+        if not args.name or not args.command:
+            print("❌ Ação 'exec' exige '--name' e '-c \"<comando>\"'.", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(exec_command(args.project, args.name, args.command))
+    elif action == "sync":
+        if not args.name or not args.src or not args.dest:
+            print("❌ Ação 'sync' exige '--name', '--src' e '--dest'.", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(sync_files(args.project, args.name, args.src, args.dest))

@@ -15,7 +15,7 @@ Uso:
   wygor migrate                         Executa as migrações pendentes do banco
   wygor search "<query>" [-p PROJETO]   Busca contexto RAG Híbrido (Vector + Keyword)
   wygor ingest <caminho> [-p PROJETO]   Ingestão incremental de repositórios / pastas
-  wygor watch <caminho> [-p PROJETO]    Monitora alterações e re-indexa em tempo real
+  wygor ssh <add|list|remove|test|exec|sync> Perfis SSH + execução/deploy via ssh e rsync nativos
   wygor memory "<nota>" [-p PROJETO]    Grava uma decisão/memória técnica no banco
   wygor git prepare <path> -t "<task>"  Prepara Git local e cria branch de trabalho
   wygor git commit <path> -m "<msg>"    Registra alterações locais no Git
@@ -74,8 +74,8 @@ def main():
     elif cmd == "ingest":
         script = os.path.join(SCRIPT_DIR, "skills/ingest_docs.py")
         subprocess.run([sys.executable, script] + args)
-    elif cmd == "watch":
-        script = os.path.join(SCRIPT_DIR, "skills/watch.py")
+    elif cmd == "ssh":
+        script = os.path.join(SCRIPT_DIR, "skills/ssh_manager.py")
         subprocess.run([sys.executable, script] + args)
     elif cmd == "memory":
         script = os.path.join(SCRIPT_DIR, "skills/memory.py")

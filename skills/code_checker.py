@@ -44,6 +44,15 @@ def detect_test_runner(repo_path):
 
     return None
 
+def _build_command(command, abs_path):
+    """Resolve o comando de validação preferindo o .venv do projeto quando existir."""
+    if command == "pytest":
+        venv_py = os.path.join(abs_path, ".venv", "bin", "python")
+        if os.path.exists(venv_py):
+            return f'"{venv_py}" -m pytest'
+    return command
+
+
 def run_validation(repo_path, command=None, timeout=60):
     """Executa a validação e retorna status, stdout e stderr."""
     abs_path = os.path.abspath(repo_path)
@@ -54,6 +63,8 @@ def run_validation(repo_path, command=None, timeout=60):
     if not command:
         print("⚠️ Nenhum runner de teste detectado automaticamente. Especifique com --cmd.", file=sys.stderr)
         return False, "Nenhum test runner configurado ou detectado."
+
+    command = _build_command(command, abs_path)
 
     print(f"🧪 Executando validação: `{command}` em {abs_path}...")
 
