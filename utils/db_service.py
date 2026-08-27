@@ -77,3 +77,32 @@ def check_tables_status(required_tables):
         conn.close()
 
     return status
+
+def get_model_for_role(role, default=None, env_var=None):
+    """
+    Fonte de verdade única para modelos LLM (Ollama).
+
+    Resolução hierárquica:
+      1. Banco de dados (tabela `model_configs`) — fonte de verdade.
+      2. Variável de ambiente (`env_var`, se informada) — fallback.
+      3. Default `qwen2.5-coder:3b` — último recurso.
+
+    Ex.: get_model_for_role("complex", default="qwen2.5-coder:3b", env_var="OLLAMA_CHAT_MODEL")
+    """
+    if default is None:
+        default = "qwen2.5-coder:3b"
+    try:
+        row = execute_query(
+            "SELECT model_name FROM model_configs WHERE task_role = %s;",
+            params=(role,),
+            fetch="one",
+        )
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        pass
+    if env_var:
+        env_value = os.getenv(env_var)
+        if env_value:
+            return env_value
+    return default

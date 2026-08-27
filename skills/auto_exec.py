@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+SKILL_MANIFEST = {
+    "intent": "auto_exec",
+    "description": "Executa comandos Bash e scripts no sistema operacional / terminal de forma segura.",
+    "allowed_actions": ["run", "execute"],
+    "keywords": ["execute", "ping", "rode", "terminal", "bash", "psql", "docker", "podman", "systemctl"],
+    "script": "auto_exec.py"
+}
 import sys
 import subprocess
 import json
@@ -10,11 +17,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+from utils.db_service import get_model_for_role
+
 # Configurações Ollama
 OLLAMA_BASE_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_EMBED_URL = f"{OLLAMA_BASE_URL}/api/embeddings"
-MODEL_LLM = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5-coder:14b")
+MODEL_LLM = get_model_for_role("complex", default="qwen2.5-coder:3b", env_var="OLLAMA_LLM_MODEL")
 MODEL_EMBED = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 # Configurações Postgres
@@ -25,6 +37,7 @@ DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASS = os.getenv("DB_PASS", "root")
 
 MAX_RETRIES = 3
+DEFAULT_TIMEOUT_SECONDS = 30
 LOG_DIR = "memory"
 LOG_FILE = os.path.join(LOG_DIR, "execution_trace.jsonl")
 TROUBLESHOOTING_FILE = os.path.join(LOG_DIR, "troubleshooting.md")
@@ -37,7 +50,7 @@ def get_embedding(text):
         headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             res = json.loads(response.read().decode("utf-8"))
             return res.get("embedding", [])
     except Exception:
@@ -88,13 +101,11 @@ def save_learned_fix(task, failed_attempt, successful_command):
 
 ---
 """
-    # Grava no arquivo de memória
     with open(TROUBLESHOOTING_FILE, "a", encoding="utf-8") as f:
         f.write(entry)
         
     print(f"📝 Aprendizado salvo em `{TROUBLESHOOTING_FILE}`.")
     
-    # Dispara a re-ingestão para sincronizar o banco vetorial
     try:
         print("⚡ Re-indexando base vetorial com o novo aprendizado...")
         subprocess.run([sys.executable, "skills/ingest_docs.py"], check=True, stdout=subprocess.DEVNULL)
@@ -107,7 +118,10 @@ def call_qwen(prompt):
         "model": MODEL_LLM,
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": 0.1}
+        "options": {
+            "temperature": 0.1,
+            "num_ctx": 8192
+        }
     }
     req = urllib.request.Request(
         OLLAMA_GENERATE_URL,
@@ -115,7 +129,7 @@ def call_qwen(prompt):
         headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=300) as response:
             res = json.loads(response.read().decode("utf-8"))
             return {
                 "response": res.get("response", "").strip(),
@@ -127,19 +141,26 @@ def call_qwen(prompt):
         print(f"❌ Erro ao conectar ao Ollama ({OLLAMA_GENERATE_URL}): {e}")
         sys.exit(1)
 
-def run_command(command):
+def run_command(command, timeout=DEFAULT_TIMEOUT_SECONDS):
     print(f"\n⚙️ Executando: {command}\n" + "-"*40)
     full_cmd = f"set -o pipefail; {command}"
-    process = subprocess.Popen(
-        full_cmd,
-        shell=True,
-        executable="/bin/bash",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-    stdout, stderr = process.communicate()
-    return process.returncode, stdout, stderr
+    
+    try:
+        process = subprocess.Popen(
+            full_cmd,
+            shell=True,
+            executable="/bin/bash",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = process.communicate(timeout=timeout)
+        return process.returncode, stdout, stderr
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        err_msg = (stderr or "") + f"\n⚠️ [TIMEOUT] Processo interrompido após exceder o tempo limite de {timeout}s."
+        return 124, stdout or "", err_msg
 
 def log_trace(trace_data):
     if not os.path.exists(LOG_DIR):
@@ -171,11 +192,13 @@ def auto_heal(task_description):
     system_rules = f"""Você é um assistente de automação Linux no Parrot OS.
 REGRAS OBRIGATÓRIAS:
 1. Responda APENAS com o comando Bash puro de linha única (ou encadeado com &&), sem markdown (```bash).
-2. Para PostgreSQL:
+2. NUNCA gere comandos de execução contínua ou infinita (ex: 'ping', 'top', 'tail -f') sem limites de contagem ou tempo.
+   - Para 'ping', adicione SEMPRE a flag de limite de pacotes: 'ping -c 4 <host>'.
+3. Para PostgreSQL:
    - NUNCA use o flag interativo -W.
    - SEMPRE adicione 'PGPASSWORD={DB_PASS}' antes do comando quando for se conectar.
    - SEMPRE especifique host, porta, usuário e banco explicitamente: '-h {DB_HOST} -p {DB_PORT} -U {DB_USER} -d {DB_NAME}'.
-3. Evite placeholders genéricos (como 'table_name'). Use subqueries reais como: (SELECT tablename FROM pg_tables WHERE schemaname='public')."""
+4. Evite placeholders genéricos (como 'table_name'). Use subqueries reais como: (SELECT tablename FROM pg_tables WHERE schemaname='public')."""
 
     context_prompt = f"\n\nCONTEXTO DO PROJETO RECUPERADO (RAG):\n{rag_context}" if rag_context else ""
     prompt = f"{system_rules}{context_prompt}\n\nTAREFA: {task_description}"
@@ -212,7 +235,6 @@ REGRAS OBRIGATÓRIAS:
             print("✅ Sucesso absoluto e validado na execução!")
             trace["status"] = "SUCCESS"
             
-            # Se precisou de autocorreção (tentativa > 1), aciona o Self-Learning
             if attempt_num > 1:
                 failed_attempt = trace["attempts"][0]
                 save_learned_fix(task_description, failed_attempt, command)

@@ -18,11 +18,17 @@ import json
 import shutil
 import subprocess
 import argparse
+import re
 import urllib.request
 from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+from utils.db_service import get_model_for_role
 
 SKILL_MANIFEST = {
     "intent": "native_workflow",
@@ -203,7 +209,7 @@ def run(command, project="default", raw=False):
 
 
 OLLAMA_GENERATE_URL = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/generate"
-NATIVE_MODEL = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5-coder:1.5b")
+NATIVE_MODEL = get_model_for_role("intermediate", default="qwen2.5-coder:3b", env_var="OLLAMA_LLM_MODEL")
 
 
 def _load_native_prompt(available_binaries_text, instruction):
@@ -227,6 +233,36 @@ def _load_native_prompt(available_binaries_text, instruction):
         ) % (available_binaries_text, instruction)
 
 
+def _extract_command_from_llm(raw_response):
+    """Extrai o campo `command` do JSON retornado pelo LLM.
+
+    Tolerante a: code fences markdown (```json/```bash), texto antes/depois do
+    JSON e respostas que já vêm como comando puro (fallback).
+    """
+    text = raw_response.strip()
+    # Remove code fences markdown (ex.: ```json ... ``` ou ```bash ... ```)
+    text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    text = re.sub(r"```$", "", text).strip()
+    # Tenta parsear o texto inteiro como JSON
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data.get("command"), data
+    except json.JSONDecodeError:
+        pass
+    # Procura o primeiro bloco {...} (JSON embutido em texto)
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, dict):
+                return data.get("command"), data
+        except json.JSONDecodeError:
+            pass
+    # Fallback: resposta não-JSON é tratada como o próprio comando
+    return text, None
+
+
 def generate_command(instruction, project="default"):
     """Gera um pipeline Bash nativo a partir de uma instrucao usando a LLM local."""
     available, _missing = map_binaries()
@@ -243,12 +279,11 @@ def generate_command(instruction, project="default"):
     try:
         with urllib.request.urlopen(req) as response:
             res = json.loads(response.read().decode("utf-8"))
-            cmd = res.get("response", "").strip()
-            if cmd.startswith("```"):
-                cmd = cmd.strip("`").strip()
-                if cmd.startswith("bash"):
-                    cmd = cmd[4:].strip()
-            return cmd
+            cmd, data = _extract_command_from_llm(res.get("response", ""))
+            if data and data.get("status") == "FAILED":
+                print(f"LLM reportou FAILED: {data.get('reasoning', '')}", file=sys.stderr)
+                return None
+            return cmd if cmd else None
     except Exception as e:
         print(f"ERRO gerar comando via LLM: {e}", file=sys.stderr)
         return None

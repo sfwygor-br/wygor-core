@@ -12,14 +12,12 @@ import importlib.util
 import glob
 from dotenv import load_dotenv
 
-# Garante que a raiz do projeto esteja no sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from utils.db_service import execute_query, check_tables_status
 from skills.model_manager import get_model_for_role
-
 from utils.prompt_loader import load_prompt
 
 load_dotenv()
@@ -28,9 +26,8 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").split('/api'
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 
-# Leitura dinâmica dos modelos via db_service / model_manager
-ROUTER_MODEL = get_model_for_role("router", default="qwen2.5-coder:1.5b")
-CHAT_MODEL = get_model_for_role("complex", default="qwen2.5-coder:14b")
+ROUTER_MODEL = get_model_for_role("router", default="qwen2.5-coder:3b")
+CHAT_MODEL = get_model_for_role("complex", default="qwen2.5-coder:3b")
 
 SKILLS_DIR = os.path.join(PROJECT_ROOT, "skills")
 
@@ -128,7 +125,6 @@ def run_skill(script_name, args_list, capture_output=True):
     except Exception as e:
         return False, "", str(e)
 
-# --- PERSISTÊNCIA DE SESSÃO VIA DB_SERVICE ---
 def create_session(project_name, title="Nova Sessão"):
     sql = "INSERT INTO chat_sessions (project_name, title) VALUES (%s, %s) RETURNING id;"
     try:
@@ -162,19 +158,15 @@ def get_last_session_id(project_name):
     except Exception:
         return None
 
-from utils.prompt_loader import load_prompt
-
 def classify_intent(user_input, active_project="default", verbose=False):
     dynamic_skills = load_dynamic_skills(True)
     
-    # 1. Montagem dinâmica da Whitelist de intents permitidas
     base_intents = ["chat", "session_manager", "db_migrate"]
     dynamic_intents = [s.get("intent") for s in dynamic_skills if s.get("intent")]
     valid_intents = list(set(base_intents + dynamic_intents))
     
     allowed_intents_str = ", ".join([f'"{i}"' for i in valid_intents])
 
-    # 2. Catálogo formatado de skills
     skills_catalog = []
     for s in dynamic_skills:
         actions_str = ", ".join([f'"{a}"' for a in s.get('allowed_actions', ['list'])])
@@ -186,7 +178,6 @@ def classify_intent(user_input, active_project="default", verbose=False):
         )
     skills_text = "\n".join(skills_catalog) if skills_catalog else "Nenhuma skill dinâmica registrada."
 
-    # 3. Carregamento do prompt a partir do arquivo
     try:
         prompt = load_prompt(
             "router_system.txt",
@@ -219,7 +210,6 @@ def classify_intent(user_input, active_project="default", verbose=False):
             res = json.loads(response.read().decode("utf-8"))
             parsed = json.loads(res.get("response", "{}"))
             
-            # 4. Trava Programática (Sanitização pós-LLM)
             intent = parsed.get("intent")
             if intent not in valid_intents:
                 if verbose:
@@ -265,8 +255,14 @@ def start_interactive_chat(project_name="default", initial_verbose=False, resume
     if resume_last and not current_session_id:
         current_session_id = get_last_session_id(active_project)
 
+    system_instruction = (
+        "Você é o Wygor Core, um ecossistema autônomo com capacidade de execução nativa de comandos Linux e auditoria no SO. "
+        "Quando comandos forem executados no sistema, você receberá a saída real do terminal e deve resumir ou reportar o resultado com autoridade, "
+        "NUNCA alegando incapacidade ou dizendo que é apenas um modelo de texto sem acesso ao terminal."
+    )
+
     messages = [
-        {"role": "system", "content": "Você é o Wygor, um assistente especialista em engenharia de software e automação."}
+        {"role": "system", "content": system_instruction}
     ]
 
     if current_session_id:
@@ -314,7 +310,7 @@ def start_interactive_chat(project_name="default", initial_verbose=False, resume
                 loaded = load_session_messages(target_id)
                 if loaded:
                     current_session_id = int(target_id)
-                    messages = [{"role": "system", "content": "Você é o Wygor, um assistente especialista em engenharia de software e automação."}] + loaded
+                    messages = [{"role": "system", "content": system_instruction}] + loaded
                     print(f"✅ Sessão #{current_session_id} carregada com sucesso!\n")
                 else:
                     print(f"❌ Não foi possível carregar a sessão #{target_id}.\n")
@@ -326,9 +322,10 @@ def start_interactive_chat(project_name="default", initial_verbose=False, resume
                     run_skill("session_manager.py", ["rename", "--id", str(current_session_id), "--title", new_title], capture_output=False)
                 continue
 
-            # ROTEAMENTO E EXECUÇÃO
             intent_data = classify_intent(user_input, active_project, verbose=verbose_mode)
             intent = intent_data.get("intent", "chat")
+            use_rag = intent_data.get("use_rag", False)
+            target_project = intent_data.get("project", active_project)
 
             dynamic_skills = load_dynamic_skills(True)
             dynamic_map = {s["intent"]: s for s in dynamic_skills}
@@ -337,14 +334,18 @@ def start_interactive_chat(project_name="default", initial_verbose=False, resume
                 skill_info = dynamic_map[intent]
                 script_target = skill_info.get("file_path") or os.path.join(SKILLS_DIR, skill_info["script"])
 
-                args_list = ["-p", active_project]
-                action = intent_data.get("action")
-                if action:
-                    args_list.append(action)
+                # Se for auto_exec, injetamos o input bruto do usuário como parâmetro
+                if intent == "auto_exec":
+                    args_list = [user_input]
+                else:
+                    args_list = ["-p", active_project]
+                    action = intent_data.get("action")
+                    if action:
+                        args_list.append(action)
 
-                for k, v in intent_data.items():
-                    if k not in ["intent", "project", "action"] and v:
-                        args_list.extend([f"--{k.replace('_', '-')}", str(v)])
+                    for k, v in intent_data.items():
+                        if k not in ["intent", "project", "action", "use_rag"] and v:
+                            args_list.extend([f"--{k.replace('_', '-')}", str(v)])
 
                 loader = AsciiLoader(f"⚙️ Executando skill '{intent}'")
                 loader.start()
@@ -378,14 +379,15 @@ def start_interactive_chat(project_name="default", initial_verbose=False, resume
                 save_message_to_db(current_session_id, "user", user_input)
 
                 system_feedback_prompt = f"""
-[RETORNO DA EXECUÇÃO DA SKILL '{intent}']:
-Status: {'Sucesso' if ok else 'Falha'}
-Saída do comando:
+[RETORNO DA EXECUÇÃO DO TERMINAL (SKILL: '{intent}')]:
+Status da Execução: {'Sucesso' if ok else 'Interrompido / Falha'}
+Saída Capturada do Terminal:
 {full_output}
 
-INSTRUÇÕES DE RESPOSTA:
-1. Resuma o resultado diretamente para o usuário de forma clara.
-2. Nunca solicite credenciais de banco de dados ou senhas.
+INSTRUÇÕES OBRIGATÓRIAS DE RESPOSTA:
+1. Você é o executor nativo do Wygor Core. O comando BASH ACIMA JÁ FOI EXECUTADO NO SISTEMA OPERACIONAL.
+2. Apresente os dados e métricas capturados no terminal acima de forma concisa e direta.
+3. NUNCA diga que não pode executar comandos, que não tem acesso ao sistema ou que é uma IA de texto.
 """
                 messages.append({"role": "system", "content": system_feedback_prompt})
 
@@ -403,6 +405,31 @@ INSTRUÇÕES DE RESPOSTA:
             else:
                 messages.append({"role": "user", "content": user_input})
                 save_message_to_db(current_session_id, "user", user_input)
+
+                if use_rag or intent == "query_knowledge":
+                    loader = AsciiLoader("🧠 Consultando base vetorial de conhecimento (RAG)...")
+                    loader.start()
+                    try:
+                        rag_args = [user_input]
+                        if target_project and str(target_project).lower() not in ["all", "global", "none", "*", "null"]:
+                            rag_args.extend(["-p", target_project])
+
+                        ok, rag_out, rag_err = run_skill("query_knowledge.py", rag_args, capture_output=True)
+                        
+                        if ok and rag_out.strip():
+                            rag_context = f"[DOCUMENTOS INDEXADOS RECUPERADOS DA BASE DE DADOS]:\n{rag_out.strip()}"
+                            messages.append({"role": "system", "content": rag_context})
+                            if verbose_mode:
+                                print(f"\n✅ [RAG] Contexto vetorial injetado ({len(rag_out)} caracteres).")
+                        else:
+                            if verbose_mode:
+                                print(f"\n⚠️ [RAG] Nenhum documento retornado na busca vetorial.")
+                            messages.append({
+                                "role": "system",
+                                "content": "⚠️ Nota do Sistema: A consulta de conhecimento no banco vetorial foi realizada, mas nenhum documento relevante foi retornado para esta busca."
+                            })
+                    finally:
+                        loader.stop()
 
                 loader = AsciiLoader("💬 Pensando...")
                 loader.start()

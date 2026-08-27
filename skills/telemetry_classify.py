@@ -16,6 +16,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+from utils.db_service import get_model_for_role
+
 SKILL_MANIFEST = {
     "intent": "telemetry_classify",
     "description": "Classifica os logs de erro coletados pela telemetria e os vetoriza na tabela document_chunks sob o escopo system_telemetry para busca semantica (RAG).",
@@ -33,7 +38,7 @@ DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASS = os.getenv("DB_PASS", "root")
 
 OLLAMA_GENERATE_URL = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/generate"
-CLASSIFY_MODEL = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5-coder:1.5b")
+CLASSIFY_MODEL = get_model_for_role("router", default="qwen2.5-coder:3b", env_var="OLLAMA_LLM_MODEL")
 
 
 def get_connection():
@@ -52,7 +57,7 @@ def get_embedding(text):
         headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             res = json.loads(response.read().decode("utf-8"))
             return res.get("embedding", [])
     except Exception:
@@ -86,11 +91,10 @@ def classify(project="default", window_hours=24, raw=False):
         print("Nenhum evento de telemetria encontrado no escopo system_telemetry para classificar.")
         return True
 
-    # NÃO abra a conexão conn aqui fora do loop!
     classified = 0
 
     for event_id, severity, signature, raw_message in rows:
-        # 1. Processamento pesado da LLM/Embedding é feito FORA de qualquer transação de banco
+        # 1. Processamento pesado da LLM/Embedding e feito FORA de qualquer transacao de banco
         llm = llm_classify(raw_message or "", signature or "")
         llm_sev = (llm.get("severity") or severity).lower()
         llm_sig = llm.get("signature") or signature or ""
@@ -102,7 +106,7 @@ def classify(project="default", window_hours=24, raw=False):
 
         file_path = f"system_telemetry://{project}/event-{event_id}"
 
-        # 2. Abre a conexão, insere e faz COMMIT IMEDIATO por item
+        # 2. Abre a conexao, insere e faz COMMIT IMEDIATO por item
         conn = get_connection()
         if not conn:
             continue
@@ -127,11 +131,10 @@ def classify(project="default", window_hours=24, raw=False):
                 sys.exit(1)
             print(f"ERRO vetorizar evento {event_id}: {e}", file=sys.stderr)
         finally:
-            conn.close()  # Garante que a conexão fecha a cada iteração
+            conn.close()
 
     print(f"Telemetria classificada e vetorizada em system_telemetry: {classified} eventos.")
     return True
-
 
 
 def _load_classify_prompt(log_content):
@@ -163,7 +166,7 @@ def llm_classify(raw_message, signature=""):
         headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=60) as response:
             res = json.loads(response.read().decode("utf-8"))
             return json.loads(res.get("response", "{}"))
     except Exception:

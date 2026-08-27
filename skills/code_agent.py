@@ -10,10 +10,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+from utils.db_service import get_model_for_role
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OLLAMA_BASE_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").split('/api')[0].rstrip('/')
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
-CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "qwen2.5-coder:14b")
+CHAT_MODEL = get_model_for_role("complex", default="qwen2.5-coder:3b", env_var="OLLAMA_CHAT_MODEL")
 
 VERBOSE = False
 

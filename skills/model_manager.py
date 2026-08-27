@@ -8,6 +8,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from utils.db_service import get_model_for_role
+
 # Manifesto para inclusão dinâmica no Wygor Chat
 SKILL_MANIFEST = {
     "name": "model_manager",
@@ -85,20 +91,6 @@ def list_models():
     except Exception as e:
         print(f"❌ Erro ao listar configurações: {e}")
         return []
-
-def get_model_for_role(role, default="qwen2.5-coder:14b"):
-    conn = get_db_connection()
-    if not conn:
-        return default
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT model_name FROM model_configs WHERE task_role = %s;", (role,))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        return row[0] if row else default
-    except Exception:
-        return default
 
 def set_model_for_role(role, model, description=None):
     conn = get_db_connection()
