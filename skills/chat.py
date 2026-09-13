@@ -186,43 +186,56 @@ def classify_intent(user_input, active_project="default", verbose=False):
             active_project=active_project,
             user_input=user_input
         )
+
     except Exception as e:
         if verbose:
             print(f"⚠️ Erro ao carregar template de prompt: {e}")
         return {"intent": "chat", "project": active_project}
 
-    payload = {
-        "model": ROUTER_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.0, "keep_alive": "30m"}
-    }
+    if verbose:
+        loader = AsciiLoader(f"⚙️ Classificando intenção '{prompt}'")
+    else:
+        loader = AsciiLoader(f"⚙️ Classificando intenção... ")
 
-    req = urllib.request.Request(
-        OLLAMA_GENERATE_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"}
-    )
+    loader.start()
 
     try:
-        with urllib.request.urlopen(req) as response:
-            res = json.loads(response.read().decode("utf-8"))
-            parsed = json.loads(res.get("response", "{}"))
-            
-            intent = parsed.get("intent")
-            if intent not in valid_intents:
-                if verbose:
-                    print(f"⚠️ Intent alucinada '{intent}' bloqueada pela Whitelist! Forçando fallback para 'chat'.")
-                parsed["intent"] = "chat"
 
+        payload = {
+            "model": ROUTER_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.0, "keep_alive": "30m"}
+        }
+
+        req = urllib.request.Request(
+            OLLAMA_GENERATE_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+
+        try:
+            with urllib.request.urlopen(req) as response:
+                res = json.loads(response.read().decode("utf-8"))
+                parsed = json.loads(res.get("response", "{}"))
+                
+                intent = parsed.get("intent")
+                if intent not in valid_intents:
+                    if verbose:
+                        print(f"⚠️ Intent alucinada '{intent}' bloqueada pela Whitelist! Forçando fallback para 'chat'.")
+                    parsed["intent"] = "chat"
+
+                if verbose:
+                    print(f"\n💬 [Raciocínio - Decisão do Roteador ({ROUTER_MODEL})]:\n{json.dumps(parsed, indent=2, ensure_ascii=False)}\n")
+                return parsed
+        except Exception as e:
             if verbose:
-                print(f"\n💬 [Raciocínio - Decisão do Roteador ({ROUTER_MODEL})]:\n{json.dumps(parsed, indent=2, ensure_ascii=False)}\n")
-            return parsed
-    except Exception as e:
-        if verbose:
-            print(f"⚠️ Erro no roteador: {e}. Assumindo 'chat'.")
-        return {"intent": "chat", "project": active_project}
+                print(f"⚠️ Erro no roteador: {e}. Assumindo 'chat'.")
+            return {"intent": "chat", "project": active_project}
+
+    finally:
+        loader.stop()
 
 def send_chat_message(messages):
     sanitized = []
@@ -247,7 +260,28 @@ def send_chat_message(messages):
     except Exception as e:
         return f"❌ Erro na comunicação com a LLM ({CHAT_MODEL}): {e}"
 
-def start_interactive_chat(project_name="default", initial_verbose=False, resume_last=False, session_id=None):
+
+def get_system_instruction():
+    dynamic_skills = load_dynamic_skills(verbose=False)
+    catalog = []
+    for s in dynamic_skills:
+        actions = ", ".join([f'"{a}"' for a in s.get('allowed_actions', [])])
+        catalog.append(
+            f"• SKILL: \"{s.get('intent')}\"\n"
+            f"  - Descrição: {s.get('description')}\n"
+            f"  - Ações: [{actions}]"
+        )
+    skills_text = "\n".join(catalog) if catalog else "Nenhuma skill dinâmica registrada."
+
+    return (
+        "Você é o Wygor Core, um ecossistema autônomo com capacidade de execução nativa de comandos Linux e auditoria no SO.\n\n"
+        "CATÁLOGO DE SKILLS DINÂMICAS REGISTRADAS NO SISTEMA:\n"
+        f"{skills_text}\n\n"
+        "Quando o usuário perguntar sobre suas skills, ferramentas ou capacidades internas, "
+        "baseie-se estritamente na lista de SKILLS DINÂMICAS acima para detalhar cada uma."
+    )
+
+def start_interactive_chat(project_name="default", initial_verbose=True, resume_last=True, session_id=None):
     active_project = project_name
     verbose_mode = initial_verbose
     current_session_id = session_id
@@ -255,11 +289,7 @@ def start_interactive_chat(project_name="default", initial_verbose=False, resume
     if resume_last and not current_session_id:
         current_session_id = get_last_session_id(active_project)
 
-    system_instruction = (
-        "Você é o Wygor Core, um ecossistema autônomo com capacidade de execução nativa de comandos Linux e auditoria no SO. "
-        "Quando comandos forem executados no sistema, você receberá a saída real do terminal e deve resumir ou reportar o resultado com autoridade, "
-        "NUNCA alegando incapacidade ou dizendo que é apenas um modelo de texto sem acesso ao terminal."
-    )
+    system_instruction = get_system_instruction()
 
     messages = [
         {"role": "system", "content": system_instruction}
