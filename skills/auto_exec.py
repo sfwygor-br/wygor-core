@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 SKILL_MANIFEST = {
     "intent": "auto_exec",
-    "description": "Executa comandos Bash e scripts no sistema operacional / terminal de forma segura.",
-    "allowed_actions": ["run", "execute"],
-    "keywords": ["execute", "ping", "rode", "terminal", "bash", "psql", "docker", "podman", "systemctl"],
-    "script": "auto_exec.py"
+    "description": "Executa comandos bash no terminal Linux para interagir com sistema de arquivos, descobrir informações de hardware, rede (IP), nome do computador e processos.",
+    "allowed_actions": ["execute"],
+    "keywords": ["bash", "comando", "sistema", "hardware", "terminal", "arquivos", "nome do computador", "ip"]
 }
 import sys
 import subprocess

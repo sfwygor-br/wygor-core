@@ -121,13 +121,11 @@ class ReActEngine:
 
     def auto_heal(self, full_output):
         """Aplica regras automáticas de Auto-Healing."""
-        # 1. Checagem de migração de banco de dados
         if any(err in full_output for err in ["ERR_MISSING_TABLE", "UndefinedTable", "does not exist"]):
             self._log("Healing Triggered", "Tabela ausente detectada. Executando db_migrate.py apply...")
             ok, out, err = run_skill_script("db_migrate.py", ["apply"])
             return ok, f"[DB Migration Healing]: {out}\n{err}"
 
-        # 2. Checagem de dependência Python faltante
         installed, module_name = detect_and_install_missing_module(full_output)
         if installed:
             return True, f"[Package Healing]: Pacote '{module_name}' foi instalado com sucesso."
@@ -160,7 +158,6 @@ class ReActEngine:
         ok, out, err = run_skill_script(script_target, args_list, capture_output=True)
         full_output = f"{out}\n{err}".strip()
 
-        # Ciclo de Healing Integrado
         healed, heal_msg = self.auto_heal(full_output)
         if healed:
             self._log("Healing Success", "Re-executando a skill após auto-correção...")
@@ -172,13 +169,13 @@ class ReActEngine:
     def run(self, user_input, messages_history, dynamic_skills, classify_prompt_builder):
         """
         Executa o loop ReAct completo:
-        1. Classificação rápida (Fast Model)
+        1. Classificação rápida com contexto histórico (Fast Model)
         2. Thought & Action (Fast/Complex Model)
         3. Observation & Auto-Healing
         4. Resposta Final / Escalada (Complex Model)
         """
-        # --- ETAPA 1: Classificação e Intent Routing (Fast Model) ---
-        prompt = classify_prompt_builder(user_input, self.project_name)
+        # --- ETAPA 1: Classificação e Intent Routing com Histórico Contextual ---
+        prompt = classify_prompt_builder(user_input, self.project_name, messages_history=messages_history)
         raw_intent = self.call_llm(self.fast_model, prompt, format_json=True)
 
         try:
@@ -190,6 +187,7 @@ class ReActEngine:
         use_rag = intent_data.get("use_rag", False)
         target_project = intent_data.get("project", self.project_name)
 
+        self._log(f"Pensamento: {prompt}", json.dumps(intent_data, indent=2, ensure_ascii=False))
         self._log(f"Decisão do Roteador ({self.fast_model})", json.dumps(intent_data, indent=2, ensure_ascii=False))
 
         # --- ETAPA 2: Ação de Skill Operacional ---
@@ -210,9 +208,8 @@ INSTRUÇÕES OBRIGATÓRIAS DE RESPOSTA:
 2. Apresente os dados e métricas capturados no terminal acima de forma concisa e direta.
 3. NUNCA diga que não pode executar comandos, que não tem acesso ao sistema ou que é uma IA de texto.
 """
-            # Em falha ou Healing, escalamos para o modelo Complexo sinteticar a explicação
-            active_model = self.complex_model if (!ok or healed) else self.fast_model
-            
+            active_model = self.complex_model if (not ok or healed) else self.fast_model
+
             temp_messages = list(messages_history)
             temp_messages.append({"role": "user", "content": user_input})
             temp_messages.append({"role": "system", "content": system_feedback_prompt})
@@ -242,6 +239,5 @@ INSTRUÇÕES OBRIGATÓRIAS DE RESPOSTA:
                     "content": "⚠️ Nota do Sistema: A consulta de conhecimento no banco vetorial foi realizada, mas nenhum documento relevante foi retornado."
                 })
 
-        # Respostas puras de chat e RAG utilizam o Modelo Complexo para maior profundidade
         response = self.call_llm(self.complex_model, temp_messages)
         return response, intent_data

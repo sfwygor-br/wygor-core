@@ -6,6 +6,8 @@ import threading
 import time
 import importlib.util
 import glob
+import json
+import urllib.request
 from dotenv import load_dotenv
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,6 +23,8 @@ load_dotenv()
 
 ROUTER_MODEL = get_model_for_role("router", default="qwen2.5-coder:3b")
 CHAT_MODEL = get_model_for_role("complex", default="qwen2.5-coder:3b")
+OLLAMA_EMBED_URL = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/embeddings"
+EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 SKILLS_DIR = os.path.join(PROJECT_ROOT, "skills")
 
 
@@ -45,6 +49,72 @@ def load_dynamic_skills(verbose=False):
                 if verbose:
                     print(f"⚠️ Warning: Falha ao carregar skill '{file}': {e}")
     return skills
+
+
+def get_embedding(text):
+    """Gera embeddings via Ollama para armazenamento na Memória Episódica."""
+    payload = {"model": EMBED_MODEL, "prompt": text[:4000]}
+    req = urllib.request.Request(
+        OLLAMA_EMBED_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            res = json.loads(response.read().decode("utf-8"))
+            return res.get("embedding", [])
+    except Exception as e:
+        print(f"⚠️ Erro ao gerar embedding da Memória Episódica: {e}")
+        return []
+
+
+def summarize_and_save_session_memory(session_id, project_name):
+    """Gera síntese pós-sessão e salva o vetor da Memória Episódica no pgvector."""
+    if not session_id:
+        return
+
+    messages = load_session_messages(session_id)
+    if not messages or len(messages) < 2:
+        return
+
+    print(f"\n🧠 [Memória Episódica] Gerando síntese pós-sessão #{session_id}...")
+
+    formatted_transcript = []
+    for m in messages:
+        if m.get("role") in ["user", "assistant"]:
+            label = "Usuário" if m["role"] == "user" else "Assistente"
+            formatted_transcript.append(f"{label}: {m['content']}")
+
+    transcript_text = "\n".join(formatted_transcript)
+
+    synthesis_prompt = (
+        "Você é o sintetizador de Memória Episódica do Wygor Core.\n"
+        "Resuma a sessão a seguir destacando:\n"
+        "1. Objetivos principais e problemas abordados.\n"
+        "2. Decisões tomadas, comandos executados e soluções validadas.\n"
+        "3. Preferências do usuário e contextos para interações futuras.\n\n"
+        f"TRANSCRIÇÃO DA SESSÃO #{session_id}:\n{transcript_text}\n\n"
+        "SÍNTESE EXECUTIVA CONCISA:"
+    )
+
+    try:
+        engine = ReActEngine(project_name=project_name)
+        summary = engine.call_llm(CHAT_MODEL, synthesis_prompt)
+
+        if not summary or "Erro na comunicação" in summary:
+            print("⚠️ Falha ao gerar síntese da sessão.")
+            return
+
+        vector = get_embedding(summary)
+
+        sql = """
+            INSERT INTO chat_episodic_memories (session_id, project_name, summary, embedding)
+            VALUES (%s, %s, %s, %s::vector);
+        """
+        execute_query(sql, (session_id, project_name, summary, vector if vector else None))
+        print(f"✅ Memória Episódica da Sessão #{session_id} persistida no pgvector com sucesso!")
+    except Exception as e:
+        print(f"⚠️ Falha ao salvar Memória Episódica: {e}")
 
 
 class AsciiLoader:
@@ -130,7 +200,8 @@ def get_last_session_id(project_name):
         return None
 
 
-def build_classify_prompt(user_input, active_project):
+def build_classify_prompt(user_input, active_project, messages_history=None):
+    """Constrói o prompt do Roteador incluindo as últimas interações do histórico."""
     dynamic_skills = load_dynamic_skills(False)
     base_intents = ["chat", "session_manager", "db_migrate"]
     dynamic_intents = [s.get("intent") for s in dynamic_skills if s.get("intent")]
@@ -148,12 +219,25 @@ def build_classify_prompt(user_input, active_project):
         )
     skills_text = "\n".join(skills_catalog) if skills_catalog else "Nenhuma skill dinâmica registrada."
 
+    # Formata as últimas 6 mensagens do histórico recente
+    history_text = ""
+    if messages_history:
+        recent = [m for m in messages_history if m.get("role") in ["user", "assistant"]][-6:]
+        if recent:
+            formatted_msgs = []
+            for m in recent:
+                role_label = "Usuário" if m["role"] == "user" else "Assistente"
+                preview = m["content"][:300].replace("\n", " ")
+                formatted_msgs.append(f"{role_label}: {preview}")
+            history_text = "\n".join(formatted_msgs)
+
     return load_prompt(
         "router_system.txt",
         allowed_intents_str=allowed_intents_str,
         skills_text=skills_text,
         active_project=active_project,
-        user_input=user_input
+        user_input=user_input,
+        chat_history=history_text if history_text else "Sem histórico recente."
     )
 
 
@@ -170,11 +254,13 @@ def get_system_instruction():
     skills_text = "\n".join(catalog) if catalog else "Nenhuma skill dinâmica registrada."
 
     return (
-        "Você é o Wygor Core, um ecossistema autônomo com capacidade de execução nativa de comandos Linux e auditoria no SO.\n\n"
+        "Você é o Wygor Core, um ecossistema autônomo com capacidade de execução nativa de comandos Linux no Parrot OS e Ubuntu Server.\n\n"
+        "REGRAS INQUEBRÁVEIS:\n"
+        "1. VOCÊ TEM ACESSO TOTAL AO SISTEMA OPERACIONAL E HARDWARE.\n"
+        "2. NUNCA diga 'Como modelo de IA, não tenho acesso...' ou 'Não posso verificar isso'.\n"
+        "3. Se você não sabe uma informação do sistema, VOCÊ DEVE inferir que uma skill de terminal será acionada a seguir para buscar essa informação.\n\n"
         "CATÁLOGO DE SKILLS DINÂMICAS REGISTRADAS NO SISTEMA:\n"
-        f"{skills_text}\n\n"
-        "Quando o usuário perguntar sobre suas skills, ferramentas ou capacidades internas, "
-        "baseie-se estritamente na lista de SKILLS DINÂMICAS acima para detalhar cada uma."
+        f"{skills_text}\n"
     )
 
 
@@ -209,8 +295,8 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
     print(" - /exit           : Encerra o chat")
     print("=" * 65 + "\n")
 
-    while True:
-        try:
+    try:
+        while True:
             status_v = " [VERBOSE ON]" if verbose_mode else ""
             user_input = input(f"wygor({active_project}#s{current_session_id}){status_v}> ").strip()
             if not user_input:
@@ -218,6 +304,7 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
 
             if user_input.lower() in ["/exit", "exit", "quit"]:
                 print("👋 Encerrando sessão do Wygor Chat.")
+                summarize_and_save_session_memory(current_session_id, active_project)
                 break
 
             if user_input.lower() == "/verbose":
@@ -246,7 +333,6 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
                     run_skill_script("session_manager.py", ["rename", "--id", str(current_session_id), "--title", new_title], capture_output=False)
                 continue
 
-            # Instancia o ReActEngine para processar o ciclo
             engine = ReActEngine(
                 fast_model=ROUTER_MODEL,
                 complex_model=CHAT_MODEL,
@@ -268,7 +354,6 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
             finally:
                 loader.stop()
 
-            # Salva histórico no PostgreSQL e na memória local
             messages.append({"role": "user", "content": user_input})
             save_message_to_db(current_session_id, "user", user_input)
 
@@ -277,9 +362,9 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
 
             print(f"\n🤖 Wygor:\n{response_text}\n")
 
-        except KeyboardInterrupt:
-            print("\n👋 Chat interrompido.")
-            break
+    except KeyboardInterrupt:
+        print("\n👋 Chat interrompido.")
+        summarize_and_save_session_memory(current_session_id, active_project)
 
 
 if __name__ == "__main__":
