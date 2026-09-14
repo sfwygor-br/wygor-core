@@ -6,21 +6,19 @@ import argparse
 import psycopg2
 from dotenv import load_dotenv
 
-load_dotenv()
-
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+load_dotenv()
+
 from utils.db_service import get_model_for_role
 
-# Manifesto para inclusão dinâmica no Wygor Chat
 SKILL_MANIFEST = {
-    "name": "model_manager",
+    "intent": "model_manager",
     "description": "Gerencia e altera os modelos LLM (Ollama) atribuídos a diferentes tarefas (router, complex, intermediate).",
-    "intent": "model_config",
     "keywords": ["modelo", "modelos", "alterar modelo", "mudar modelo", "configurar llm", "qwen"],
-    "script": "model_manager.py"
+    "script": "skills/model_manager.py"
 }
 
 DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
@@ -35,7 +33,7 @@ def get_db_connection():
             host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS
         )
     except Exception as e:
-        print(f"❌ Erro ao conectar ao PostgreSQL: {e}")
+        print(f"❌ Erro ao conectar ao PostgreSQL: {e}", file=sys.stderr)
         return None
 
 def init_db():
@@ -65,7 +63,7 @@ def init_db():
         print("✅ Tabela 'model_configs' inicializada com sucesso!")
         return True
     except Exception as e:
-        print(f"❌ Erro na migração/seed: {e}")
+        print(f"❌ Erro na migração/seed: {e}", file=sys.stderr)
         return False
 
 def list_models():
@@ -89,7 +87,10 @@ def list_models():
             configs.append({"role": role, "model": model, "description": desc})
         return configs
     except Exception as e:
-        print(f"❌ Erro ao listar configurações: {e}")
+        if "UndefinedTable" in str(e) or "does not exist" in str(e):
+            print("ERR_MISSING_TABLE: Tabela 'model_configs' ausente.", file=sys.stderr)
+        else:
+            print(f"❌ Erro ao listar configurações: {e}", file=sys.stderr)
         return []
 
 def set_model_for_role(role, model, description=None):
@@ -112,11 +113,14 @@ def set_model_for_role(role, model, description=None):
         print(f"✅ Modelo para o papel '{role}' alterado com sucesso para '{model}'!")
         return True
     except Exception as e:
-        print(f"❌ Erro ao atualizar modelo: {e}")
+        if "UndefinedTable" in str(e) or "does not exist" in str(e):
+            print("ERR_MISSING_TABLE: Tabela 'model_configs' ausente.", file=sys.stderr)
+        else:
+            print(f"❌ Erro ao atualizar modelo: {e}", file=sys.stderr)
         return False
 
 if __name__ == "__main__":
-    init_db()  # Garante schema resiliente antes de qualquer operação
+    init_db()
     
     parser = argparse.ArgumentParser(description="Skill de Gerenciamento de Modelos LLM")
     parser.add_argument("action", choices=["list", "set", "get", "init"], nargs="?", default="list", help="Ação a executar")

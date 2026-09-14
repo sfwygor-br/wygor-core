@@ -89,7 +89,7 @@ class ReActEngine:
                 "model": model,
                 "messages": sanitized,
                 "stream": False,
-                "options": {"keep_alive": "30m"}
+                "options": {"keep_alive": "30m", "num_ctx": 8192}
             }
             url = OLLAMA_CHAT_URL
         else:
@@ -97,7 +97,7 @@ class ReActEngine:
                 "model": model,
                 "prompt": prompt_or_messages,
                 "stream": False,
-                "options": {"keep_alive": "30m"}
+                "options": {"keep_alive": "30m", "num_ctx": 8192}
             }
             if format_json:
                 payload["format"] = "json"
@@ -168,11 +168,11 @@ class ReActEngine:
 
     def run(self, user_input, messages_history, dynamic_skills, classify_prompt_builder):
         """
-        Executa o loop ReAct completo:
+        Executa o loop ReAct flexível:
         1. Classificação rápida com contexto histórico (Fast Model)
-        2. Thought & Action (Fast/Complex Model)
+        2. Deliberação/Planejamento vs. Execução Imediata de Skill
         3. Observation & Auto-Healing
-        4. Resposta Final / Escalada (Complex Model)
+        4. Resposta Final / Escalada Arquitetural (Complex Model)
         """
         # --- ETAPA 1: Classificação e Intent Routing com Histórico Contextual ---
         prompt = classify_prompt_builder(user_input, self.project_name, messages_history=messages_history)
@@ -187,26 +187,37 @@ class ReActEngine:
         use_rag = intent_data.get("use_rag", False)
         target_project = intent_data.get("project", self.project_name)
 
-        self._log(f"Pensamento: {prompt}", json.dumps(intent_data, indent=2, ensure_ascii=False))
         self._log(f"Decisão do Roteador ({self.fast_model})", json.dumps(intent_data, indent=2, ensure_ascii=False))
 
-        # --- ETAPA 2: Ação de Skill Operacional ---
+        # --- ETAPA 2: Flexibilidade Conversacional e Deliberação ---
+        # Se a intenção for 'chat' ou envolver escolhas arquiteturais, prioriza o diálogo estruturado
         dynamic_map = {s["intent"]: s for s in dynamic_skills}
-        if intent in dynamic_map:
+        if intent in dynamic_map and not intent_data.get("deliberative_turn", False):
             self._log("Action Step", f"Executando skill dinamicamente: {intent}")
             ok, full_output, healed = self.execute_action(intent_data, user_input, dynamic_skills)
 
+            if ok:
+                status_msg = "Sucesso"
+                instructions = (
+                    "1. Apresente os dados e métricas capturados no terminal de forma clara e objetiva.\n"
+                    "2. Se aplicável, comente os impactos técnicos ou os próximos passos recomendados."
+                )
+            else:
+                status_msg = "Interrompido / Falha na Execução"
+                instructions = (
+                    "1. Identifique e explique o erro reportado na saída do terminal.\n"
+                    "2. Sugira a correção necessária no script/comando com postura de Arquiteto Sênior."
+                )
+
             system_feedback_prompt = f"""
 [RETORNO DA EXECUÇÃO DO TERMINAL (SKILL: '{intent}')]:
-Status da Execução: {'Sucesso' if ok else 'Interrompido / Falha'}
+Status da Execução: {status_msg}
 Healing Aplicado: {'Sim' if healed else 'Não'}
 Saída Capturada do Terminal:
 {full_output}
 
 INSTRUÇÕES OBRIGATÓRIAS DE RESPOSTA:
-1. Você é o executor nativo do Wygor Core. O comando BASH ACIMA JÁ FOI EXECUTADO NO SISTEMA OPERACIONAL.
-2. Apresente os dados e métricas capturados no terminal acima de forma concisa e direta.
-3. NUNCA diga que não pode executar comandos, que não tem acesso ao sistema ou que é uma IA de texto.
+{instructions}
 """
             active_model = self.complex_model if (not ok or healed) else self.fast_model
 
@@ -217,7 +228,7 @@ INSTRUÇÕES OBRIGATÓRIAS DE RESPOSTA:
             response = self.call_llm(active_model, temp_messages)
             return response, intent_data
 
-        # --- ETAPA 3: Ação Conversacional / RAG / Raciocínio Profundo ---
+        # --- ETAPA 3: Ação Conversacional / RAG / Análise de Arquitetura ---
         temp_messages = list(messages_history)
         temp_messages.append({"role": "user", "content": user_input})
 
@@ -232,11 +243,6 @@ INSTRUÇÕES OBRIGATÓRIAS DE RESPOSTA:
                 temp_messages.append({
                     "role": "system",
                     "content": f"[DOCUMENTOS INDEXADOS RECUPERADOS DA BASE DE DADOS]:\n{rag_out.strip()}"
-                })
-            else:
-                temp_messages.append({
-                    "role": "system",
-                    "content": "⚠️ Nota do Sistema: A consulta de conhecimento no banco vetorial foi realizada, mas nenhum documento relevante foi retornado."
                 })
 
         response = self.call_llm(self.complex_model, temp_messages)

@@ -29,7 +29,6 @@ SKILLS_DIR = os.path.join(PROJECT_ROOT, "skills")
 
 
 def load_dynamic_skills(verbose=False):
-    """Varre a pasta skills/ mapeando manifestos plug-and-play."""
     skills = []
     if os.path.exists(SKILLS_DIR):
         for file in glob.glob(os.path.join(SKILLS_DIR, "*.py")):
@@ -52,7 +51,6 @@ def load_dynamic_skills(verbose=False):
 
 
 def get_embedding(text):
-    """Gera embeddings via Ollama para armazenamento na Memória Episódica."""
     payload = {"model": EMBED_MODEL, "prompt": text[:4000]}
     req = urllib.request.Request(
         OLLAMA_EMBED_URL,
@@ -69,7 +67,6 @@ def get_embedding(text):
 
 
 def summarize_and_save_session_memory(session_id, project_name):
-    """Gera síntese pós-sessão e salva o vetor da Memória Episódica no pgvector."""
     if not session_id:
         return
 
@@ -106,7 +103,6 @@ def summarize_and_save_session_memory(session_id, project_name):
             return
 
         vector = get_embedding(summary)
-
         sql = """
             INSERT INTO chat_episodic_memories (session_id, project_name, summary, embedding)
             VALUES (%s, %s, %s, %s::vector);
@@ -172,12 +168,24 @@ def create_session(project_name, title="Nova Sessão"):
         return None
 
 
-def save_message_to_db(session_id, role, content):
+def save_message_to_db(session_id, role, content, prompt_tokens=0, completion_tokens=0):
     if not session_id:
         return
     try:
-        execute_query("INSERT INTO chat_messages (session_id, role, content) VALUES (%s, %s, %s);", (session_id, role, content))
-        execute_query("UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = %s;", (session_id,))
+        total_tokens = prompt_tokens + completion_tokens
+        execute_query(
+            "INSERT INTO chat_messages (session_id, role, content, prompt_tokens, completion_tokens, total_tokens) VALUES (%s, %s, %s, %s, %s, %s);",
+            (session_id, role, content, prompt_tokens, completion_tokens, total_tokens)
+        )
+        execute_query(
+            """UPDATE chat_sessions 
+               SET total_prompt_tokens = COALESCE(total_prompt_tokens, 0) + %s,
+                   total_completion_tokens = COALESCE(total_completion_tokens, 0) + %s,
+                   total_tokens = COALESCE(total_tokens, 0) + %s,
+                   updated_at = CURRENT_TIMESTAMP 
+               WHERE id = %s;""",
+            (prompt_tokens, completion_tokens, total_tokens, session_id)
+        )
     except Exception:
         pass
 
@@ -200,8 +208,33 @@ def get_last_session_id(project_name):
         return None
 
 
+def display_session_stats(session_id, project_name, messages_history):
+    """Exibe a telemetria e o consumo da sessão atual."""
+    sql = """
+        SELECT COALESCE(total_prompt_tokens, 0), 
+               COALESCE(total_completion_tokens, 0), 
+               COALESCE(total_tokens, 0)
+        FROM chat_sessions WHERE id = %s;
+    """
+    row = execute_query(sql, (session_id,), commit=False, fetch="one") or (0, 0, 0)
+    prompt_tok, comp_tok, total_tok = row
+
+    context_chars = sum(len(m.get("content", "")) for m in messages_history)
+    estimated_context_tokens = int(context_chars / 4)
+
+    print("\n" + "=" * 55)
+    print(f"📊 TELEMETRIA E ESTATÍSTICAS DA SESSÃO #{session_id}")
+    print("=" * 55)
+    print(f"📂 Projeto Ativo:               {project_name}")
+    print(f"💬 Turnos Gravados:             {len(messages_history) // 2}")
+    print(f"🧠 Contexto Ativo (Estimado):   ~{estimated_context_tokens:,} tokens ({context_chars:,} chars)")
+    print(f"📥 Tokens de Entrada (Prompt):   {prompt_tok:,}")
+    print(f"📤 Tokens de Saída (Completion): {comp_tok:,}")
+    print(f"⚡ Total Acumulado na Sessão:   {total_tok:,}")
+    print("=" * 55 + "\n")
+
+
 def build_classify_prompt(user_input, active_project, messages_history=None):
-    """Constrói o prompt do Roteador incluindo as últimas interações do histórico."""
     dynamic_skills = load_dynamic_skills(False)
     base_intents = ["chat", "session_manager", "db_migrate"]
     dynamic_intents = [s.get("intent") for s in dynamic_skills if s.get("intent")]
@@ -219,7 +252,6 @@ def build_classify_prompt(user_input, active_project, messages_history=None):
         )
     skills_text = "\n".join(skills_catalog) if skills_catalog else "Nenhuma skill dinâmica registrada."
 
-    # Formata as últimas 6 mensagens do histórico recente
     history_text = ""
     if messages_history:
         recent = [m for m in messages_history if m.get("role") in ["user", "assistant"]][-6:]
@@ -254,11 +286,16 @@ def get_system_instruction():
     skills_text = "\n".join(catalog) if catalog else "Nenhuma skill dinâmica registrada."
 
     return (
-        "Você é o Wygor Core, um ecossistema autônomo com capacidade de execução nativa de comandos Linux no Parrot OS e Ubuntu Server.\n\n"
-        "REGRAS INQUEBRÁVEIS:\n"
-        "1. VOCÊ TEM ACESSO TOTAL AO SISTEMA OPERACIONAL E HARDWARE.\n"
+        "Você é o Wygor Core, um ecossistema autônomo com inteligência operacional e capacidade de execução nativa no Parrot OS e Ubuntu Server.\n\n"
+        "PERFIL DA PERSONA E POSTURA TÉCNICA:\n"
+        "- Você atua como Arquiteto de Software e Engenheiro Backend Senior, além de Professor Técnico.\n"
+        "- Possui ampla experiência em sistemas críticos, bancos relacionais e vetoriais (Oracle PL/SQL, PostgreSQL/pgvector), APIs RESTful (Python/Node.js), ecossistemas Linux e IA local sob TDD/SDD.\n"
+        "- Sua comunicação é clara, direta, estruturada e altamente didática.\n"
+        "- DELIBERAÇÃO E ARQUITETURA: Quando uma solicitação do usuário admitir mais de uma abordagem técnica viável, NÃO execute comandos precipitadamente. Apresente primeiro as opções (ex: 'Podemos seguir pela Abordagem A ou pela Abordagem B') acompanhadas dos prós e contras arquiteturais antes de agir.\n\n"
+        "REGRAS INQUEBRÁVEIS DE ACESSO AO SISTEMA:\n"
+        "1. VOCÊ TEM ACESSO TOTAL AO SISTEMA OPERACIONAL E HARDWARE VIA SKILLS.\n"
         "2. NUNCA diga 'Como modelo de IA, não tenho acesso...' ou 'Não posso verificar isso'.\n"
-        "3. Se você não sabe uma informação do sistema, VOCÊ DEVE inferir que uma skill de terminal será acionada a seguir para buscar essa informação.\n\n"
+        "3. Se você necessita de dados do sistema, acione a skill correspondente no ReAct Engine para obtê-los.\n\n"
         "CATÁLOGO DE SKILLS DINÂMICAS REGISTRADAS NO SISTEMA:\n"
         f"{skills_text}\n"
     )
@@ -290,6 +327,7 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
     print("Comandos do Chat:")
     print(" - /sessions       : Lista todas as sessões anteriores")
     print(" - /resume <id>    : Carrega o contexto de uma sessão específica")
+    print(" - /stats          : Exibe métricas de telemetria e contexto da sessão")
     print(" - /title <nome>   : Define um título para a sessão atual")
     print(" - /verbose        : Liga/Desliga exibição detalhada de raciocínio")
     print(" - /exit           : Encerra o chat")
@@ -312,19 +350,25 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
                 print(f"🔍 Modo Transparente (Verbose) {'ATIVADO ✅' if verbose_mode else 'DESATIVADO ❌'}\n")
                 continue
 
+            if user_input.lower() == "/stats":
+                display_session_stats(current_session_id, active_project, messages)
+                continue
+
             if user_input.lower() == "/sessions":
                 run_skill_script("session_manager.py", ["list", "-p", active_project], capture_output=False)
                 continue
 
             if user_input.lower().startswith("/resume "):
-                target_id = user_input.split()[1]
-                loaded = load_session_messages(target_id)
-                if loaded:
-                    current_session_id = int(target_id)
-                    messages = [{"role": "system", "content": system_instruction}] + loaded
-                    print(f"✅ Sessão #{current_session_id} carregada com sucesso!\n")
-                else:
-                    print(f"❌ Não foi possível carregar a sessão #{target_id}.\n")
+                parts = user_input.split()
+                if len(parts) > 1:
+                    target_id = parts[1]
+                    loaded = load_session_messages(target_id)
+                    if loaded:
+                        current_session_id = int(target_id)
+                        messages = [{"role": "system", "content": system_instruction}] + loaded
+                        print(f"✅ Sessão #{current_session_id} carregada com sucesso!\n")
+                    else:
+                        print(f"❌ Não foi possível carregar a sessão #{target_id}.\n")
                 continue
 
             if user_input.lower().startswith("/title "):

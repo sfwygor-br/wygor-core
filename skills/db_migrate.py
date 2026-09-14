@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Manifesto para inclusão no Roteador Dinâmico do Chat
 SKILL_MANIFEST = {
     "intent": "db_migrate",
     "description": "Gerencia e executa migrações no banco de dados PostgreSQL. Aplica schema.sql base e arquivos incrementais em migrations/*.sql rastreando versões.",
@@ -43,6 +42,7 @@ REQUIRED_TABLES = [
     "native_execution_logs"
 ]
 
+
 def get_connection():
     try:
         import psycopg2
@@ -52,6 +52,7 @@ def get_connection():
     except Exception as e:
         print(f"❌ Erro ao conectar ao PostgreSQL ({DB_HOST}:{DB_PORT}): {e}", file=sys.stderr)
         sys.exit(1)
+
 
 def check_status():
     """Verifica quais tabelas obrigatórias existem no banco de dados."""
@@ -82,6 +83,7 @@ def check_status():
     
     return all_ok, status
 
+
 def apply_base_schema(conn):
     """Aplica o schema.sql base se o arquivo existir."""
     if not os.path.exists(SCHEMA_PATH):
@@ -104,20 +106,19 @@ def apply_base_schema(conn):
     finally:
         cur.close()
 
+
 def run_migrations():
     """Executa a aplicação do schema base e migrações incrementais."""
     print("🔄 [DB Migrate] Verificando e aplicando estrutura do banco de dados...")
 
     conn = get_connection()
     try:
-        # 1. Aplica o schema base
         if not apply_base_schema(conn):
             print("❌ Falha ao aplicar schema.sql base.", file=sys.stderr)
             return False
 
         cur = conn.cursor()
 
-        # 2. Garante a tabela de controle de versão
         cur.execute("""
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version TEXT PRIMARY KEY,
@@ -126,7 +127,6 @@ def run_migrations():
         """)
         conn.commit()
 
-        # 3. Processa migrações incrementais
         migration_files = sorted(glob.glob(os.path.join(MIGRATIONS_DIR, "*.sql")))
         applied_count = 0
         for filepath in migration_files:
@@ -146,14 +146,13 @@ def run_migrations():
 
         cur.close()
 
-        # 4. Validação final rigorosa das tabelas obrigatórias
         all_ok, status = check_status()
         if not all_ok:
             missing = [tbl for tbl, exists in status.items() if not exists]
             print(f"❌ [DB Migrate] Erro: As seguintes tabelas ainda estão ausentes: {missing}", file=sys.stderr)
             return False
 
-        print("✨ [DB Migrate] Banco de dados totalmente sincronizado e verificado!")
+        print(f"✨ [DB Migrate] Banco de dados totalmente sincronizado! ({applied_count} novas migrações).")
         return True
 
     except Exception as e:
@@ -161,6 +160,7 @@ def run_migrations():
         return False
     finally:
         conn.close()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Skill de Migração e Gestão de BD Wygor Core")

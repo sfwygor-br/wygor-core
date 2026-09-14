@@ -10,6 +10,10 @@ import json
 import argparse
 from dotenv import load_dotenv
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 load_dotenv()
 
 SKILL_MANIFEST = {
@@ -83,7 +87,10 @@ def get_last_session(project):
         if row:
             print(row[0])
     except Exception as e:
-        print(f"❌ Erro ao buscar última sessão: {e}", file=sys.stderr)
+        if "UndefinedTable" in str(e) or "does not exist" in str(e):
+            print("ERR_MISSING_TABLE: Tabela 'chat_sessions' ausente.", file=sys.stderr)
+        else:
+            print(f"❌ Erro ao buscar última sessão: {e}", file=sys.stderr)
     finally:
         cur.close()
         conn.close()
@@ -96,7 +103,10 @@ def rename_session(session_id, new_title):
         conn.commit()
         print(f"✅ Sessão #{session_id} renomeada para '{new_title}'.")
     except Exception as e:
-        print(f"❌ Erro ao renomear sessão: {e}", file=sys.stderr)
+        if "UndefinedTable" in str(e) or "does not exist" in str(e):
+            print("ERR_MISSING_TABLE: Tabela 'chat_sessions' ausente.", file=sys.stderr)
+        else:
+            print(f"❌ Erro ao renomear sessão: {e}", file=sys.stderr)
     finally:
         cur.close()
         conn.close()
@@ -109,7 +119,10 @@ def delete_session(session_id):
         conn.commit()
         print(f"🗑️ Sessão #{session_id} e suas mensagens foram excluídas.")
     except Exception as e:
-        print(f"❌ Erro ao deletar sessão: {e}", file=sys.stderr)
+        if "UndefinedTable" in str(e) or "does not exist" in str(e):
+            print("ERR_MISSING_TABLE: Tabela 'chat_sessions' ausente.", file=sys.stderr)
+        else:
+            print(f"❌ Erro ao deletar sessão: {e}", file=sys.stderr)
     finally:
         cur.close()
         conn.close()

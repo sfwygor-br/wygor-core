@@ -8,7 +8,18 @@ import urllib.request
 import psycopg2
 from dotenv import load_dotenv
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 load_dotenv()
+
+SKILL_MANIFEST = {
+    "intent": "memory",
+    "description": "Ingestão incremental e sincronização de arquivos para busca semântica no pgvector.",
+    "keywords": ["ingestao", "memoria", "rag", "vetorizar", "sincronizar arquivos", "indexar"],
+    "script": "skills/memory.py"
+}
 
 OLLAMA_EMBED_URL = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/embeddings"
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
@@ -92,21 +103,28 @@ def run_ingestion(target_path, project_name, clean_reindex=False):
 
     print(f"⚡ Sincronização iniciada para o projeto [{project_name}] em: {target_path}")
 
-    conn = psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS
-    )
-    cur = conn.cursor()
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS
+        )
+        cur = conn.cursor()
 
-    if clean_reindex:
-        print(f"🧹 Forçando re-indexação limpa do projeto [{project_name}]...")
-        cur.execute("DELETE FROM document_chunks WHERE project_name = %s;", (project_name,))
-        conn.commit()
+        if clean_reindex:
+            print(f"🧹 Forçando re-indexação limpa do projeto [{project_name}]...")
+            cur.execute("DELETE FROM document_chunks WHERE project_name = %s;", (project_name,))
+            conn.commit()
 
-    cur.execute(
-        "SELECT file_path, file_hash FROM document_chunks WHERE project_name = %s GROUP BY file_path, file_hash;",
-        (project_name,)
-    )
-    db_file_hashes = {row[0]: row[1] for row in cur.fetchall()}
+        cur.execute(
+            "SELECT file_path, file_hash FROM document_chunks WHERE project_name = %s GROUP BY file_path, file_hash;",
+            (project_name,)
+        )
+        db_file_hashes = {row[0]: row[1] for row in cur.fetchall()}
+    except Exception as e:
+        if "UndefinedTable" in str(e) or "does not exist" in str(e):
+            print("ERR_MISSING_TABLE: Tabela 'document_chunks' ausente.", file=sys.stderr)
+        else:
+            print(f"❌ Erro ao conectar/consultar banco de dados: {e}", file=sys.stderr)
+        sys.exit(1)
 
     disk_files = set()
     added_count = 0

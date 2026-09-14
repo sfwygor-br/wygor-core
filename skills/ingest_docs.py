@@ -34,8 +34,8 @@ ALLOWED_EXTENSIONS = {
     ".txt", ".sh", ".sql", ".yaml", ".yml", ".env.example"
 }
 
+
 def calculate_file_hash(filepath):
-    """Calcula a assinatura SHA-256 do arquivo."""
     sha256 = hashlib.sha256()
     try:
         with open(filepath, "rb") as f:
@@ -45,8 +45,8 @@ def calculate_file_hash(filepath):
     except Exception:
         return None
 
+
 def get_embedding(text):
-    """Gera embeddings no Ollama garantindo limite de tamanho e timeout."""
     payload = {"model": EMBED_MODEL, "prompt": text[:4000]}
     req = urllib.request.Request(
         OLLAMA_EMBED_URL,
@@ -61,8 +61,8 @@ def get_embedding(text):
         print(f"  ⚠️ Erro no embedding do Ollama: {e}")
         return []
 
+
 def chunk_text(text, max_chars=1200, overlap_chars=200):
-    """Chunker baseado em caracteres e quebras de linha para evitar estouro de memória."""
     if len(text) <= max_chars:
         return [text]
 
@@ -83,6 +83,7 @@ def chunk_text(text, max_chars=1200, overlap_chars=200):
         start = end - overlap_chars if end < text_len else text_len
 
     return chunks
+
 
 def run_ingestion(target_path, project_name, clean_reindex=False):
     target_path = os.path.abspath(target_path)
@@ -200,15 +201,16 @@ def run_ingestion(target_path, project_name, clean_reindex=False):
 
     return added_count + updated_count
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ingestão Incremental no Wygor Core")
     parser.add_argument("path", nargs="?", default=".", help="Caminho da pasta")
     parser.add_argument("-p", "--project", default="", help="Nome do projeto")
     parser.add_argument("--clean", action="store_true", help="Força re-indexação limpa do projeto")
-    
+
     args = parser.parse_args()
-    
+
     path = os.path.abspath(args.path)
     project = args.project if args.project else os.path.basename(path)
-    
+
     run_ingestion(path, project, clean_reindex=args.clean)
