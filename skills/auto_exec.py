@@ -3,6 +3,8 @@ import os
 import sys
 import json
 import time
+import re
+import shutil
 import subprocess
 import urllib.request
 import psycopg2
@@ -12,7 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_ROOT: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -20,7 +22,7 @@ from skills.model_manager import get_model_for_role
 
 SKILL_MANIFEST: Dict[str, Any] = {
     "intent": "auto_exec",
-    "description": "Executa comandos bash no terminal Linux para interagir com o SO, sistema de arquivos, rede, hardware e processos.",
+    "description": "Executa comandos bash no terminal Linux com auto-healing estruturado.",
     "allowed_actions": ["execute"],
     "keywords": ["bash", "comando", "sistema", "hardware", "terminal", "arquivos", "nome do computador", "ip"],
     "script": "skills/auto_exec.py"
@@ -47,15 +49,15 @@ TROUBLESHOOTING_FILE: str = os.path.join(LOG_DIR, "troubleshooting.md")
 SOUND_PATH: str = "/usr/share/sounds/freedesktop/stereo/service-logout.oga"
 
 # Estilização ANSI
-C_GREEN = "\033[1;32m"
-C_CYAN = "\033[1;36m"
-C_YELLOW = "\033[1;33m"
-C_RED = "\033[1;31m"
-C_RESET = "\033[0m"
+C_GREEN: str = "\033[1;32m"
+C_CYAN: str = "\033[1;36m"
+C_YELLOW: str = "\033[1;33m"
+C_RED: str = "\033[1;31m"
+C_RESET: str = "\033[0m"
 
 
 def play_completion_sound(sound_path: str = SOUND_PATH) -> None:
-    """Dispara o efeito sonoro de conclusão em background sem bloquear o runtime."""
+    """Dispara efeito sonoro em background sem bloquear o runtime."""
     if shutil.which("paplay"):
         cmd = ["paplay", sound_path]
     elif shutil.which("canberra-gtk-play"):
@@ -72,6 +74,7 @@ def play_completion_sound(sound_path: str = SOUND_PATH) -> None:
 
 
 def get_embedding(text: str) -> List[float]:
+    """Gera embeddings via Ollama API."""
     payload = {"model": MODEL_EMBED, "prompt": text[:4000]}
     req = urllib.request.Request(
         OLLAMA_EMBED_URL,
@@ -87,6 +90,7 @@ def get_embedding(text: str) -> List[float]:
 
 
 def retrieve_rag_context(query: str, limit: int = 3) -> str:
+    """Recupera contexto episódico da base vetorial PostgreSQL."""
     embedding = get_embedding(query)
     if not embedding:
         return ""
@@ -118,12 +122,13 @@ def retrieve_rag_context(query: str, limit: int = 3) -> str:
 
 
 def save_learned_fix(task: str, failed_attempt: Dict[str, Any], successful_command: str) -> None:
+    """Registra soluções aprendidas no histórico de troubleshooting."""
     os.makedirs(LOG_DIR, exist_ok=True)
     entry = f"""
 ## Resolução de Problema - {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 - **Tarefa**: {task}
-- **Comando que Falhou**: `{failed_attempt['generated_command']}`
-- **Erro (STDERR)**: {failed_attempt['stderr'].strip()}
+- **Comando que Falhou**: `{failed_attempt.get('generated_command', '')}`
+- **Erro (STDERR)**: {str(failed_attempt.get('stderr', '')).strip()}
 - **Solução Validada**: `{successful_command}`
 
 ---
@@ -133,13 +138,15 @@ def save_learned_fix(task: str, failed_attempt: Dict[str, Any], successful_comma
 
     try:
         ingest_script = os.path.join(PROJECT_ROOT, "skills", "ingest_docs.py")
-        subprocess.run([sys.executable, ingest_script, LOG_DIR], check=True, stdout=subprocess.DEVNULL)
-        print(f"{C_GREEN}[✓] Aprendizado gravado e re-indexado na memória episódica.{C_RESET}")
+        if os.path.exists(ingest_script):
+            subprocess.run([sys.executable, ingest_script, LOG_DIR], check=True, stdout=subprocess.DEVNULL)
+            print(f"{C_GREEN}[✓] Aprendizado gravado e re-indexado na memória episódica.{C_RESET}")
     except Exception as e:
         print(f"{C_YELLOW}[!] Falha ao re-indexar aprendizado: {e}{C_RESET}")
 
 
 def call_qwen(prompt: str) -> Dict[str, Any]:
+    """Chama o modelo Ollama configurado."""
     payload = {
         "model": MODEL_LLM,
         "prompt": prompt,
@@ -165,7 +172,29 @@ def call_qwen(prompt: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
+def parse_llm_json(response_text: str) -> Dict[str, Any]:
+    """Parse resiliente de JSON para respostas de modelos pequenos."""
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+        
+        # Fallback de emergência caso venha bash bruto
+        clean_cmd = response_text.replace("```bash", "").replace("```json", "").replace("```", "").strip()
+        return {
+            "analysis": "Execução direta gerada via fallback de parse.",
+            "command": clean_cmd,
+            "status": "EXECUTE"
+        }
+
+
 def run_command(command: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> Tuple[int, str, str]:
+    """Executa um comando Bash no sistema com isolamento e timeout."""
     start_t = time.time()
     print(f"\n{C_CYAN}┌─── [ BASH EXECUTION ] ──────────────────────────────────────────────┐{C_RESET}")
     print(f"{C_CYAN}│ $ {command}{C_RESET}")
@@ -194,21 +223,31 @@ def run_command(command: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> Tuple[i
 
 
 def log_trace(trace_data: Dict[str, Any]) -> None:
+    """Grava o log de execução no arquivo de trace."""
     os.makedirs(LOG_DIR, exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(trace_data, ensure_ascii=False) + "\n")
 
 
 def print_metrics(trace: Dict[str, Any]) -> None:
+    """Exibe painel ANSI formatado com resumo da execução."""
     total_tokens = trace["total_prompt_tokens"] + trace["total_completion_tokens"]
-    status_icon = "✓ SUCCESS" if trace['status'] == "SUCCESS" else "✗ FAILED"
-    status_color = C_GREEN if trace['status'] == "SUCCESS" else C_RED
+    
+    if trace['status'] == "SUCCESS":
+        status_icon = "✓ SUCCESS"
+        status_color = C_GREEN
+    elif trace['status'] == "NEED_HUMAN":
+        status_icon = "⚠ NEED_HUMAN"
+        status_color = C_YELLOW
+    else:
+        status_icon = "✗ FAILED"
+        status_color = C_RED
 
     border = "─" * 63
     print(f"\n{status_color}┌{border}┐{C_RESET}")
     print(f"{status_color}│ ░▒▓ WYGOR CORE ENGINE :: RUNTIME TRACE [{trace['id']}] ▓▒░ │{C_RESET}")
     print(f"{status_color}├{border}┤{C_RESET}")
-    print(f"{status_color}│{C_RESET}  STATUS       : [ {status_color}{status_icon:<10}{C_RESET} ]                               │")
+    print(f"{status_color}│{C_RESET}  STATUS       : [ {status_color}{status_icon:<12}{C_RESET} ]                              │")
     print(f"{status_color}│{C_RESET}  MODEL        : {trace['model']:<44} │")
     print(f"{status_color}│{C_RESET}  ATTEMPTS     : {len(trace['attempts']):<44} │")
     print(f"{status_color}│{C_RESET}  TOTAL TOKENS : {total_tokens:<44} │")
@@ -217,6 +256,7 @@ def print_metrics(trace: Dict[str, Any]) -> None:
 
 
 def auto_heal(task_description: str) -> Tuple[bool, Dict[str, Any]]:
+    """Loop principal de auto-healing e execução atômica."""
     print(f"{C_GREEN}[+] Auto-Exec ativado para a meta: '{task_description}'{C_RESET}")
     rag_context = retrieve_rag_context(task_description)
 
@@ -231,18 +271,21 @@ def auto_heal(task_description: str) -> Tuple[bool, Dict[str, Any]]:
         "status": "IN_PROGRESS"
     }
 
-    system_rules = f"""Você é o assistente de automação Linux do Wygor Core no Parrot OS/Ubuntu Server.
+    system_rules = f"""Você é o Agente de Auto-Healing e Execução Linux do Wygor Core.
+Analise a tarefa ou o erro recebido e responda EXCLUSIVAMENTE em JSON CRU (sem marcações markdown).
 
-DIRETRIZES DE EXECUÇÃO EM 3 NÍVEIS:
-- NÍVEL 1 (Inspeção / Comandos Diretos): Para status de serviço, disco, processos ou leitura rápida, gere um comando Bash puro, atômico e de linha única.
-- NÍVEL 2 (Lógica Estruturada / Medição / Parsing JSON): NUNCA force scripts Python em linha única ('python3 -c "..."'). Escreva um script Python em '/tmp/script_wygor.py' e execute-o (cat << 'EOF' > /tmp/script_wygor.py ... EOF && python3 /tmp/script_wygor.py).
-- NÍVEL 3 (Alteração em Projetos / Refatoração): Indique o uso das ferramentas de engenharia de código.
+[REGRAS DE EXECUÇÃO]
+- NÍVEL 1 (Inspeção): Comando Bash direto e atômico.
+- NÍVEL 2 (Lógica/Parsing): Script Python em '/tmp/script_wygor.py' executado via Bash (`cat << 'EOF' > /tmp/script_wygor.py ... EOF && python3 /tmp/script_wygor.py`).
+- NÍVEL 3 (Intervenção Necessária): Se o erro exigir decisão do usuário, credenciais indisponíveis ou refatoração profunda de projeto, defina status como "NEED_HUMAN".
+- PostgreSQL: Use 'PGPASSWORD={DB_PASS}' especificando '-h {DB_HOST} -p {DB_PORT} -U {DB_USER} -d {DB_NAME}'.
 
-REGRAS OBRIGATÓRIAS DE SINTAXE:
-1. Responda APENAS com o comando Bash puro executável.
-2. NUNCA gere comandos infinitos sem limite.
-3. Para PostgreSQL: Use 'PGPASSWORD={DB_PASS}' especificando '-h {DB_HOST} -p {DB_PORT} -U {DB_USER} -d {DB_NAME}'.
-"""
+[SAÍDA OBRIGATÓRIA - ESTRUTURA JSON]
+{{
+  "analysis": "Diagnóstico em 1 frase concisa",
+  "command": "comando_bash_executavel",
+  "status": "EXECUTE" | "NEED_HUMAN"
+}}"""
 
     context_prompt = f"\n\nCONTEXTO DO PROJETO RECUPERADO (RAG):\n{rag_context}" if rag_context else ""
     prompt = f"{system_rules}{context_prompt}\n\nTAREFA: {task_description}"
@@ -252,15 +295,41 @@ REGRAS OBRIGATÓRIAS DE SINTAXE:
             print(f"{C_YELLOW}[!] Tentativa {attempt_num}/{MAX_RETRIES}...{C_RESET}")
 
         qwen_res = call_qwen(prompt)
-        command = qwen_res["response"].replace("```bash", "").replace("```", "").strip()
+        payload = parse_llm_json(qwen_res["response"])
+
+        analysis: str = payload.get("analysis", "Analisando instrução...")
+        command: str = payload.get("command", "").strip()
+        status: str = payload.get("status", "EXECUTE")
 
         trace["total_prompt_tokens"] += qwen_res["prompt_tokens"]
         trace["total_completion_tokens"] += qwen_res["completion_tokens"]
+
+        print(f"\n{C_YELLOW}[DIAGNÓSTICO]: {analysis}{C_RESET}")
+
+        # Interrupção graciosa se o modelo solicitar ação humana
+        if status == "NEED_HUMAN" or not command:
+            print(f"{C_RED}[!] Interrupção: Intervenção manual solicitada pelo motor de execução.{C_RESET}")
+            trace["status"] = "NEED_HUMAN"
+            attempt_record = {
+                "attempt": attempt_num,
+                "analysis": analysis,
+                "generated_command": command,
+                "returncode": -1,
+                "stdout": "",
+                "stderr": "HUMAN_INTERVENTION_REQUESTED",
+                "tokens": {"prompt": qwen_res["prompt_tokens"], "completion": qwen_res["completion_tokens"]},
+                "duration_ms": qwen_res["total_duration_ms"]
+            }
+            trace["attempts"].append(attempt_record)
+            log_trace(trace)
+            print_metrics(trace)
+            return False, trace
 
         returncode, stdout, stderr = run_command(command)
 
         attempt_record = {
             "attempt": attempt_num,
+            "analysis": analysis,
             "generated_command": command,
             "returncode": returncode,
             "stdout": stdout,
@@ -280,7 +349,7 @@ REGRAS OBRIGATÓRIAS DE SINTAXE:
 
             log_trace(trace)
             print_metrics(trace)
-            play_completion_sound()  # Dispara a musiquinha de sucesso!
+            play_completion_sound()
             return True, trace
         else:
             if stderr:
@@ -289,14 +358,14 @@ REGRAS OBRIGATÓRIAS DE SINTAXE:
             prompt = f"""{system_rules}{context_prompt}
 
 O comando abaixo FALHOU ao ser executado:
-Comando: {command}
+Comando Anterior: {command}
 Código de Saída: {returncode}
 Erro / STDERR:
 {stderr}
 Saída / STDOUT:
 {stdout}
 
-Reescreva o comando corrigindo os erros mantendo a regra dos 3 níveis."""
+Forneça um novo JSON com a análise atualizada do erro e o comando corrigido."""
 
     trace["status"] = "FAILED"
     log_trace(trace)
@@ -309,5 +378,5 @@ if __name__ == "__main__":
         print("Uso: python3 skills/auto_exec.py 'descrição da tarefa'")
         sys.exit(1)
 
-    task = " ".join(sys.argv[1:])
-    auto_heal(task)
+    task_input = " ".join(sys.argv[1:])
+    auto_heal(task_input)

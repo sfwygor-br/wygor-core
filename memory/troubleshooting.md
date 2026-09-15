@@ -173,3 +173,26 @@ else
 fi`
 
 ---
+
+## Resolução de Problema - 2026-09-15 15:17:18
+- **Tarefa**: e agora
+- **Comando que Falhou**: `# Verificar status do PostgreSQL
+PGPASSWORD=root psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -c "SELECT version();"
+
+
+Este comando verifica o status atual do servidor PostgreSQL, incluindo a versão instalada.`
+- **Erro (STDERR)**: /bin/bash: line 5: Este: command not found
+- **Solução Validada**: `# Verificar status do PostgreSQL
+PGPASSWORD=root psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -c "SELECT version();"`
+
+---
+
+## Resolução de Problema - 2026-09-15 15:19:42
+- **Tarefa**: voce precisa criar o script e executalo pelo auto exec
+- **Comando que Falhou**: `python3 /tmp/script_wygor.py`
+- **Erro (STDERR)**: python3: can't open file '/tmp/script_wygor.py': [Errno 2] No such file or directory
+- **Solução Validada**: `cat << 'EOF' > /tmp/script_wygor.py
+print("Teste de script")
+EOF && python3 /tmp/script_wygor.py`
+
+---
