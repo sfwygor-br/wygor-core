@@ -24,8 +24,8 @@ from utils.agent_engine import ReActEngine, run_skill_script
 
 load_dotenv()
 
-ROUTER_MODEL: str = "deepseek-chat"#get_model_for_role("router", default="qwen2.5-coder:3b")
-CHAT_MODEL: str = "deepseek-chat"#get_model_for_role("complex", default="qwen2.5-coder:7b")
+ROUTER_MODEL: str = get_model_for_role("router", default="qwen2.5-coder:3b")#"deepseek-chat"#
+CHAT_MODEL: str = get_model_for_role("complex", default="qwen2.5-coder:7b")#"deepseek-chat"#
 OLLAMA_EMBED_URL: str = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/embeddings"
 EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 SKILLS_DIR: str = os.path.join(PROJECT_ROOT, "skills")
