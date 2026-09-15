@@ -8,6 +8,7 @@ import subprocess
 import urllib.request
 from typing import Dict, Any, List, Tuple, Optional, TypedDict
 from dotenv import load_dotenv
+import shutil
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -21,7 +22,36 @@ load_dotenv()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").split('/api')[0].rstrip('/')
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
+
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip('/')
+
 SKILLS_DIR = os.path.join(PROJECT_ROOT, "skills")
+SOUND_PATH = "/usr/share/sounds/freedesktop/stereo/service-logout.oga"
+
+# Cores ANSI Hacker Old-School
+C_GREEN = "\033[1;32m"
+C_DARK_GREEN = "\033[0;32m"
+C_CYAN = "\033[1;36m"
+C_YELLOW = "\033[1;33m"
+C_RED = "\033[1;31m"
+C_RESET = "\033[0m"
+
+
+def play_completion_sound(sound_path: str = SOUND_PATH) -> None:
+    if shutil.which("paplay"):
+        cmd = ["paplay", sound_path]
+    elif shutil.which("canberra-gtk-play"):
+        cmd = ["canberra-gtk-play", "-f", sound_path]
+    elif shutil.which("ffplay"):
+        cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", sound_path]
+    else:
+        return
+
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 class ExecutionTrace(TypedDict):
@@ -39,13 +69,14 @@ def sanitize_for_json(text: str) -> str:
 
 
 def run_skill_script(script_name: str, args_list: List[str], capture_output: bool = True) -> Tuple[bool, str, str]:
-    """Executa um script de skill no ambiente Python atual."""
     if os.path.isabs(script_name):
         script_path = script_name
+    elif os.path.exists(os.path.join(PROJECT_ROOT, script_name)):
+        script_path = os.path.join(PROJECT_ROOT, script_name)
+    elif os.path.exists(os.path.join(SKILLS_DIR, script_name)):
+        script_path = os.path.join(SKILLS_DIR, script_name)
     else:
-        path_in_skills = os.path.join(SKILLS_DIR, script_name)
-        path_in_root = os.path.join(PROJECT_ROOT, script_name)
-        script_path = path_in_skills if os.path.exists(path_in_skills) else path_in_root
+        script_path = os.path.join(SKILLS_DIR, os.path.basename(script_name))
 
     try:
         res = subprocess.run(
@@ -62,17 +93,16 @@ def run_skill_script(script_name: str, args_list: List[str], capture_output: boo
 
 
 def detect_and_install_missing_module(error_log: str) -> Tuple[bool, Optional[str]]:
-    """Healing: detecta módulos Python ausentes e tenta instalar via pip."""
     match = re.search(r"ModuleNotFoundError: No module named '(\w+)'", error_log)
     if match:
         module = match.group(1)
-        print(f"   📦 [Auto-Healing] Instalando dependência faltante: {module}...")
+        print(f"{C_YELLOW}[!] AUTO-HEALING: Instalando módulo ausente '{module}'...{C_RESET}")
         try:
             subprocess.run([sys.executable, "-m", "pip", "install", module], check=True, capture_output=True)
-            print(f"   ✅ Pacote '{module}' instalado com sucesso.")
+            print(f"{C_GREEN}[✓] Pacote '{module}' instalado com sucesso.{C_RESET}")
             return True, module
         except subprocess.CalledProcessError as e:
-            print(f"   ❌ Falha ao instalar '{module}': {e.stderr.decode() if e.stderr else ''}")
+            print(f"{C_RED}[✗] Falha ao instalar '{module}': {e.stderr.decode() if e.stderr else ''}{C_RESET}")
             return False, module
     return False, None
 
@@ -94,10 +124,71 @@ class ReActEngine:
 
     def _log(self, title: str, content: str) -> None:
         if self.verbose:
-            print(f"\n⚙️ [{title}]:\n{content}\n")
+            filler = '─' * max(0, 45 - len(title))
+            print(f"\n{C_DARK_GREEN}┌─── [ DEBUG :: {title} ] {filler}┐{C_RESET}")
+            for line in content.splitlines():
+                print(f"{C_DARK_GREEN}│{C_RESET} {line}")
+            border_bottom = '─' * 60
+            print(f"{C_DARK_GREEN}└{border_bottom}┘{C_RESET}\n")
+
+    def _call_deepseek_api(self, model: str, prompt_or_messages: Any, format_json: bool = False) -> str:
+        if not DEEPSEEK_API_KEY:
+            return "❌ Erro: DEEPSEEK_API_KEY não configurada no .env"
+
+        start_time = time.time()
+        
+        if isinstance(prompt_or_messages, list):
+            sanitized_messages = []
+            for m in prompt_or_messages:
+                sanitized_messages.append({
+                    "role": m.get("role", "user"),
+                    "content": sanitize_for_json(m.get("content", ""))
+                })
+        else:
+            sanitized_messages = [{"role": "user", "content": sanitize_for_json(str(prompt_or_messages))}]
+
+        payload = {
+            "model": model,
+            "messages": sanitized_messages,
+            "stream": False
+        }
+
+        if format_json:
+            payload["response_format"] = {"type": "json_object"}
+
+        url = f"{DEEPSEEK_BASE_URL}/chat/completions"
+        self._log(f"DEEPSEEK API INPUT ({model})", json.dumps(payload, indent=2, ensure_ascii=False))
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+            }
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=120) as response:
+                res = json.loads(response.read().decode("utf-8"))
+                total_time = round(time.time() - start_time, 2)
+                
+                content = res.get("choices", [{}])[0].get("message", {}).get("content", "")
+                usage = res.get("usage", {})
+                p_tokens = usage.get("prompt_tokens", 0)
+                c_tokens = usage.get("completion_tokens", 0)
+
+                telemetry_box = f"TIME: {total_time}s | PROMPT TOKENS: {p_tokens} | COMPLETION TOKENS: {c_tokens} (DeepSeek API)"
+                self._log(f"DEEPSEEK API OUTPUT ({model})", f"{content}\n\n[TELEMETRY: {telemetry_box}]")
+                return content
+        except Exception as e:
+            return f"❌ Erro na comunicação com DeepSeek API ({model}): {e}"
 
     def call_llm(self, model: str, prompt_or_messages: Any, format_json: bool = False) -> str:
-        """Dispara requisição ao Ollama e exibe telemetria detalhada se verbose=True."""
+        # Roteamento transparente se o modelo for DeepSeek
+        if model.lower().startswith("deepseek"):
+            return self._call_deepseek_api(model, prompt_or_messages, format_json)
+
         start_time = time.time()
 
         if isinstance(prompt_or_messages, list):
@@ -127,8 +218,7 @@ class ReActEngine:
             url = OLLAMA_GENERATE_URL
             injected_prompt_preview = prompt_or_messages
 
-        # Log detalhado do prompt injetado no SLM
-        self._log(f"SLM INPUT PROMPT ({model})", injected_prompt_preview)
+        self._log(f"SLM INPUT ({model})", injected_prompt_preview)
 
         req = urllib.request.Request(
             url,
@@ -140,30 +230,26 @@ class ReActEngine:
                 res = json.loads(response.read().decode("utf-8"))
                 total_time = round(time.time() - start_time, 2)
                 
-                # Extração de métricas nativas do Ollama
-                p_tokens = res.get("prompt_eval_count", 0)
-                c_tokens = res.get("eval_count", 0)
-                eval_dur_s = (res.get("eval_duration", 0) or 1) / 1e9
+                p_tokens = res.get("prompt_eval_count", 0) or 0
+                c_tokens = res.get("eval_count", 0) or 0
+                eval_dur_ns = res.get("eval_duration") or 0
+                eval_dur_s = eval_dur_ns / 1e9 if eval_dur_ns > 0 else 1.0
                 tok_per_sec = round(c_tokens / eval_dur_s, 2) if eval_dur_s > 0 else 0.0
 
                 content = res.get("message", {}).get("content", "") if isinstance(prompt_or_messages, list) else res.get("response", "")
 
-                metrics_str = (
-                    f"⏱️ Tempo total: {total_time}s | "
-                    f"📥 Prompt Tokens: {p_tokens} | "
-                    f"📤 Completion Tokens: {c_tokens} | "
-                    f"⚡ Velocidade: {tok_per_sec} tok/s"
+                telemetry_box = (
+                    f"TIME: {total_time}s | PROMPT TOKENS: {p_tokens} | "
+                    f"COMPLETION TOKENS: {c_tokens} | SPEED: {tok_per_sec} tok/s"
                 )
-
-                self._log(f"SLM OUTPUT RESPONSE ({model})", f"{content}\n\n📊 [{metrics_str}]")
+                self._log(f"SLM OUTPUT ({model})", f"{content}\n\n[TELEMETRY: {telemetry_box}]")
                 return content
         except Exception as e:
             return f"❌ Erro na comunicação com LLM ({model}): {e}"
 
     def auto_heal(self, full_output: str) -> Tuple[bool, Optional[str]]:
-        """Aplica regras automáticas de Auto-Healing."""
         if any(err in full_output for err in ["ERR_MISSING_TABLE", "UndefinedTable", "does not exist"]):
-            self._log("Healing Triggered", "Tabela ausente detectada. Executando db_migrate.py apply...")
+            print(f"{C_YELLOW}[!] AUTO-HEALING: Tabela ausente detectada. Executando db_migrate...{C_RESET}")
             ok, out, err = run_skill_script("db_migrate.py", ["apply"])
             return ok, f"[DB Migration Healing]: {out}\n{err}"
 
@@ -179,7 +265,6 @@ class ReActEngine:
         user_input: str, 
         dynamic_skills: List[Dict[str, Any]]
     ) -> Tuple[bool, str, bool]:
-        """Mapeia a intenção e executa a Skill no SO."""
         intent = intent_data.get("intent", "chat")
         dynamic_map = {s["intent"]: s for s in dynamic_skills}
 
@@ -187,7 +272,7 @@ class ReActEngine:
             return False, f"Skill '{intent}' não encontrada no catálogo.", False
 
         skill_info = dynamic_map[intent]
-        script_target = skill_info.get("file_path") or os.path.join(SKILLS_DIR, skill_info["script"])
+        script_target = skill_info.get("file_path") or skill_info.get("script") or os.path.join(SKILLS_DIR, f"{intent}.py")
 
         if intent == "auto_exec":
             args_list = [user_input]
@@ -197,8 +282,9 @@ class ReActEngine:
             if action:
                 args_list.append(action)
 
+            ignored_keys = {"intent", "project", "action", "use_rag", "deliberative_turn", "summary", "assumptions", "dependencies", "test_cmd"}
             for k, v in intent_data.items():
-                if k not in ["intent", "project", "action", "use_rag", "deliberative_turn", "summary", "assumptions", "dependencies", "test_cmd"] and v:
+                if k not in ignored_keys and v is not None:
                     args_list.extend([f"--{k.replace('_', '-')}", str(v)])
 
         ok, out, err = run_skill_script(script_target, args_list, capture_output=True)
@@ -206,7 +292,7 @@ class ReActEngine:
 
         healed, heal_msg = self.auto_heal(full_output)
         if healed:
-            self._log("Healing Success", "Re-executando a skill após auto-correção...")
+            print(f"{C_CYAN}[↺] Re-executando skill após Auto-Healing...{C_RESET}")
             ok, out, err = run_skill_script(script_target, args_list, capture_output=True)
             full_output = f"{heal_msg}\n\n[Re-execução após Healing]:\n{out}\n{err}".strip()
 
@@ -220,42 +306,30 @@ class ReActEngine:
         messages_history: List[Dict[str, str]], 
         max_attempts: int = 3
     ) -> Tuple[str, Dict[str, Any]]:
-        """
-        Executa o Pipeline de Engenharia em Malha Fechada (Closed-Loop):
-        1. Altera/Cria arquivo via code_engineer.py (sem commit prévio).
-        2. Executa o teste/comando via auto_exec.py ou code_checker.py no SO.
-        3. Se aprovação (returncode == 0): Dispara git_guard.py para commit validado.
-        4. Se falha (returncode != 0): Injeta STDERR na LLM para re-gravação e re-teste.
-        """
         test_cmd: str = intent_data.get("test_cmd", "python3 -m unittest")
         target_file: Optional[str] = intent_data.get("file")
         repo_path: str = intent_data.get("repository", ".")
 
-        self._log("Closed-Loop Pipeline", f"Iniciando ciclo autônomo de engenharia para: {user_input}")
+        print(f"{C_CYAN}[+] Iniciando Closed-Loop Pipeline para: {intent_data.get('summary', 'refatoração')}{C_RESET}")
 
+        err_test = ""
+        out_test = ""
         for attempt in range(1, max_attempts + 1):
-            self._log("Loop Step", f"Tentativa {attempt}/{max_attempts} - Gravando alterações de código...")
+            print(f"{C_DARK_GREEN} ├─ [Step {attempt}/{max_attempts}] Aplicando código em disco...{C_RESET}")
 
-            ok_code, out_code, healed_code = self.execute_action(intent_data, user_input, dynamic_skills)
+            ok_code, out_code, _ = self.execute_action(intent_data, user_input, dynamic_skills)
             if not ok_code:
                 return f"❌ Falha na etapa de escrita do código: {out_code}", intent_data
 
-            self._log("Loop Step", f"Executando validação em runtime: `{test_cmd}`")
-            ok_test, out_test, err_test = run_skill_script(
-                "auto_exec.py", 
-                [test_cmd], 
-                capture_output=True
-            )
+            print(f"{C_DARK_GREEN} ├─ [Validation] Executando comando: `{test_cmd}`{C_RESET}")
+            ok_test, out_test, err_test = run_skill_script("auto_exec.py", [test_cmd], capture_output=True)
 
             if ok_test and "ERROR:" not in err_test and "Traceback" not in err_test:
-                self._log("Closed-Loop Success", "Validação concluída com sucesso! Disparando Git Commit Validado...")
+                print(f"{C_GREEN} └─ [✓] Testes Aprovados! Registrando Git Commit...{C_RESET}")
+                play_completion_sound()
 
                 commit_msg = f"feat(auto-fix): {intent_data.get('summary', 'refatoracao validada em malha fechada')}"
-                ok_git, out_git, err_git = run_skill_script(
-                    "git_guard.py", 
-                    ["commit", repo_path, "-m", commit_msg], 
-                    capture_output=True
-                )
+                run_skill_script("git_guard.py", ["commit", repo_path, "-m", commit_msg], capture_output=True)
 
                 reviewer_prompt = load_prompt("reviewer_system.txt")
                 engineer_prompt = load_prompt("engineer_system.txt")
@@ -282,7 +356,7 @@ Apresente um resumo claro e técnico do código implementado e dos testes valida
                 response = self.call_llm(self.complex_model, temp_messages)
                 return response, intent_data
 
-            self._log("Closed-Loop Auto-Fix", f"Falha detectada no teste. Reinjetando STDERR na LLM...")
+            print(f"{C_YELLOW} ├─ [!] Falha detectada no runtime. Injetando STDERR na LLM para retentativa...{C_RESET}")
 
             fix_prompt = f"""
 [FALHA DE EXECUÇÃO EM RUNTIME - TENTATIVA {attempt}/{max_attempts}]
@@ -311,8 +385,6 @@ INSTRUÇÕES DE REFATORAÇÃO:
         dynamic_skills: List[Dict[str, Any]], 
         classify_prompt_builder: Any
     ) -> Tuple[str, Dict[str, Any]]:
-        """Executa o fluxo completo do ReAct Engine V3.0."""
-        # --- ETAPA 1: Classificação Avançada ---
         prompt = classify_prompt_builder(user_input, self.project_name, messages_history=messages_history)
         raw_intent = self.call_llm(self.fast_model, prompt, format_json=True)
 
@@ -326,15 +398,15 @@ INSTRUÇÕES DE REFATORAÇÃO:
         target_project = intent_data.get("project", self.project_name)
         deliberative_turn = intent_data.get("deliberative_turn", False)
 
-        self._log(f"Diagnóstico do Roteador V3.0 ({self.fast_model})", json.dumps(intent_data, indent=2, ensure_ascii=False))
+        print(f"{C_GREEN}[+] ROUTER :: Intent='{intent}' | Project='{target_project}' | RAG={use_rag}{C_RESET}")
+        self._log("ROUTER JSON RAW", json.dumps(intent_data, indent=2, ensure_ascii=False))
 
-        # --- Early Context Retrieval (RAG) ---
         rag_context = ""
         if use_rag or intent in ["query_knowledge", "code_engineer"]:
-            self._log("Early Context RAG", "Recuperando contexto vetorial preventivo...")
+            print(f"{C_DARK_GREEN}[+] RAG :: Consultando base vetorial pgvector...{C_RESET}")
             rag_args = [user_input]
             if target_project and str(target_project).lower() not in ["all", "global", "none", "*", "null"]:
-                rag_args.extend(["-p", target_project])
+                rag_args.extend(["-p", str(target_project)])
 
             ok_rag, rag_out, _ = run_skill_script("query_knowledge.py", rag_args, capture_output=True)
             if ok_rag and rag_out.strip():
@@ -342,16 +414,12 @@ INSTRUÇÕES DE REFATORAÇÃO:
 
         dynamic_map = {s["intent"]: s for s in dynamic_skills}
 
-        # --- ETAPA 2: Pipeline de Engenharia Closed-Loop (code_engineer) ---
         if intent == "code_engineer":
             return self.execute_engineering_pipeline(user_input, intent_data, dynamic_skills, messages_history)
 
-        # --- ETAPA 3: Camada Cognitiva e Deliberação ---
         plan_context = ""
         if deliberative_turn and intent not in dynamic_map:
-            self._log("Deliberator Turn", "Invocando análise deliberativa para diálogo...")
             deliberative_prompt = load_prompt("deliberator_system.txt")
-            
             temp_messages = list(messages_history)
             temp_messages.append({"role": "system", "content": deliberative_prompt})
             if rag_context:
@@ -361,7 +429,6 @@ INSTRUÇÕES DE REFATORAÇÃO:
             response = self.call_llm(self.complex_model, temp_messages)
             return response, intent_data
         elif deliberative_turn and intent in dynamic_map:
-            self._log("Deliberator Turn", "Gerando plano de execução prévio...")
             deliberative_prompt = load_prompt("deliberator_system.txt")
             temp_messages = list(messages_history)
             temp_messages.append({"role": "system", "content": deliberative_prompt})
@@ -370,12 +437,13 @@ INSTRUÇÕES DE REFATORAÇÃO:
             temp_messages.append({"role": "user", "content": f"Diagnóstico do Roteador:\n{json.dumps(intent_data, ensure_ascii=False)}\n\nSolicitação: {user_input}"})
 
             plan_context = self.call_llm(self.complex_model, temp_messages)
-            self._log("Plano Deliberado", plan_context)
 
-        # --- ETAPA 4: Execução da Action Skill Padrão ---
         if intent in dynamic_map:
-            self._log("Action Step", f"Executando skill dinamicamente no SO: {intent}")
+            print(f"{C_CYAN}[>] EXEC :: Disparando skill '{intent}' no SO...{C_RESET}")
             ok, full_output, healed = self.execute_action(intent_data, user_input, dynamic_skills)
+
+            if ok:
+                play_completion_sound()
 
             reviewer_prompt = load_prompt("reviewer_system.txt")
             engineer_prompt = load_prompt("engineer_system.txt")
@@ -410,7 +478,6 @@ REGRAS CRÍTICAS DA RESPOSTA FINAL:
             response = self.call_llm(active_model, temp_messages)
             return response, intent_data
 
-        # Fallback para chat padrão
         temp_messages = list(messages_history)
         temp_messages.append({"role": "user", "content": user_input})
         if rag_context:

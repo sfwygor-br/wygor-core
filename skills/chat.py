@@ -24,15 +24,22 @@ from utils.agent_engine import ReActEngine, run_skill_script
 
 load_dotenv()
 
-ROUTER_MODEL: str = get_model_for_role("router", default="qwen2.5-coder:3b")
-CHAT_MODEL: str = get_model_for_role("complex", default="qwen2.5-coder:7b")
+ROUTER_MODEL: str = "deepseek-chat"#get_model_for_role("router", default="qwen2.5-coder:3b")
+CHAT_MODEL: str = "deepseek-chat"#get_model_for_role("complex", default="qwen2.5-coder:7b")
 OLLAMA_EMBED_URL: str = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/embeddings"
 EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 SKILLS_DIR: str = os.path.join(PROJECT_ROOT, "skills")
 
+# Cores Terminal Retro Hacker
+C_GREEN = "\033[1;32m"
+C_DARK_GREEN = "\033[0;32m"
+C_CYAN = "\033[1;36m"
+C_YELLOW = "\033[1;33m"
+C_GRAY = "\033[1;30m"
+C_RESET = "\033[0m"
+
 
 def load_dynamic_skills(verbose: bool = False) -> List[Dict[str, Any]]:
-    """Carrega dinamicamente os manifestos de skills registrados no diretório /skills."""
     skills: List[Dict[str, Any]] = []
     if os.path.exists(SKILLS_DIR):
         for file in glob.glob(os.path.join(SKILLS_DIR, "*.py")):
@@ -41,21 +48,22 @@ def load_dynamic_skills(verbose: bool = False) -> List[Dict[str, Any]]:
                 continue
 
             spec = importlib.util.spec_from_file_location(mod_name, file)
+            if not spec or not spec.loader:
+                continue
             mod = importlib.util.module_from_spec(spec)
             try:
                 spec.loader.exec_module(mod)
                 if hasattr(mod, "SKILL_MANIFEST"):
-                    manifest = mod.SKILL_MANIFEST
+                    manifest = getattr(mod, "SKILL_MANIFEST")
                     manifest["file_path"] = file
                     skills.append(manifest)
             except Exception as e:
                 if verbose:
-                    print(f"⚠️ Warning: Falha ao carregar skill '{file}': {e}")
+                    print(f"{C_YELLOW}[!] Falha ao carregar skill '{file}': {e}{C_RESET}")
     return skills
 
 
 def get_embedding(text: str) -> List[float]:
-    """Gera o vetor de embedding para a memória episódica."""
     payload = {"model": EMBED_MODEL, "prompt": text[:4000]}
     req = urllib.request.Request(
         OLLAMA_EMBED_URL,
@@ -67,12 +75,11 @@ def get_embedding(text: str) -> List[float]:
             res = json.loads(response.read().decode("utf-8"))
             return res.get("embedding", [])
     except Exception as e:
-        print(f"⚠️ Erro ao gerar embedding da Memória Episódica: {e}")
+        print(f"{C_YELLOW}[!] Erro ao gerar embedding: {e}{C_RESET}")
         return []
 
 
 def summarize_and_save_session_memory(session_id: Optional[int], project_name: str) -> None:
-    """Sintetiza e persiste a memória episódica da sessão no pgvector."""
     if not session_id:
         return
 
@@ -80,7 +87,7 @@ def summarize_and_save_session_memory(session_id: Optional[int], project_name: s
     if not messages or len(messages) < 2:
         return
 
-    print(f"\n🧠 [Memória Episódica] Gerando síntese pós-sessão #{session_id}...")
+    print(f"\n{C_DARK_GREEN}[🧠] Sintetizando memória episódica pós-sessão #{session_id}...{C_RESET}")
 
     formatted_transcript = []
     for m in messages:
@@ -105,7 +112,6 @@ def summarize_and_save_session_memory(session_id: Optional[int], project_name: s
         summary = engine.call_llm(CHAT_MODEL, synthesis_prompt)
 
         if not summary or "Erro na comunicação" in summary:
-            print("⚠️ Falha ao gerar síntese da sessão.")
             return
 
         vector = get_embedding(summary)
@@ -113,46 +119,33 @@ def summarize_and_save_session_memory(session_id: Optional[int], project_name: s
             INSERT INTO chat_episodic_memories (session_id, project_name, summary, embedding)
             VALUES (%s, %s, %s, %s::vector);
         """
-        execute_query(sql, (session_id, project_name, summary, vector if vector else None))
-        print(f"✅ Memória Episódica da Sessão #{session_id} persistida no pgvector com sucesso!")
+        execute_query(sql, (session_id, project_name, summary, str(vector) if vector else None))
+        print(f"{C_GREEN}[✓] Memória episódica da sessão #{session_id} persistida.{C_RESET}")
     except Exception as e:
-        print(f"⚠️ Falha ao salvar Memória Episódica: {e}")
+        print(f"{C_YELLOW}[!] Falha ao salvar memória episódica: {e}{C_RESET}")
 
 
 class AsciiLoader:
-    """Animação ASCII interativa com cronômetro em tempo real durante o processamento do ReAct Engine."""
-    def __init__(self, message: str = "Processando SLM", min_display: float = 0.5) -> None:
+    def __init__(self, message: str = "PROCESSING SLM", min_display: float = 0.5) -> None:
         self.message = message
         self.min_display = min_display
         self.stop_running = False
         self.thread: Optional[threading.Thread] = None
         self.start_time: Optional[float] = None
-        self.frames = [
-            r"  o>  /|    .  ",
-            r"  o_  /|   .   ",
-            r"  o\_.  .      ",
-            r" \o/•          ",
-            r"  o===> •      ",
-            r"  o/      •--->",
-            r"  o>           "
-        ]
+        self.frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     def _animate(self) -> None:
         idx = 0
         self.start_time = time.time()
         while not self.stop_running:
-            elapsed = time.time() - self.start_time
+            elapsed = time.time() - (self.start_time or time.time())
             frame = self.frames[idx % len(self.frames)]
-            sys.stdout.write(f"\r🛠️  {self.message} {frame} \033[93m[{elapsed:.1f}s]\033[0m")
+            sys.stdout.write(f"\r{C_GREEN}[{frame}] {self.message} ... [{elapsed:.1f}s]{C_RESET}")
             sys.stdout.flush()
             idx += 1
-            time.sleep(0.1)
+            time.sleep(0.08)
 
-        elapsed = time.time() - (self.start_time or time.time())
-        if elapsed < self.min_display:
-            time.sleep(self.min_display - elapsed)
-
-        sys.stdout.write("\r" + " " * 85 + "\r")
+        sys.stdout.write("\r" + " " * 70 + "\r")
         sys.stdout.flush()
 
     def start(self) -> None:
@@ -223,7 +216,6 @@ def get_last_session_id(project_name: str) -> Optional[int]:
 
 
 def display_session_stats(session_id: Optional[int], project_name: str, messages_history: List[Dict[str, str]]) -> None:
-    """Exibe a telemetria e o consumo da sessão atual."""
     sql = """
         SELECT COALESCE(total_prompt_tokens, 0), 
                COALESCE(total_completion_tokens, 0), 
@@ -236,20 +228,23 @@ def display_session_stats(session_id: Optional[int], project_name: str, messages
     context_chars = sum(len(m.get("content", "")) for m in messages_history)
     estimated_context_tokens = int(context_chars / 4)
 
-    print("\n" + "=" * 55)
-    print(f"📊 TELEMETRIA E ESTATÍSTICAS DA SESSÃO #{session_id}")
-    print("=" * 55)
-    print(f"📂 Projeto Ativo:               {project_name}")
-    print(f"💬 Turnos Gravados:             {len(messages_history) // 2}")
-    print(f"🧠 Contexto Ativo (Estimado):   ~{estimated_context_tokens:,} tokens ({context_chars:,} chars)")
-    print(f"📥 Tokens de Entrada (Prompt):   {prompt_tok:,}")
-    print(f"📤 Tokens de Saída (Completion): {comp_tok:,}")
-    print(f"⚡ Total Acumulado na Sessão:   {total_tok:,}")
-    print("=" * 55 + "\n")
+    pad_title = ' ' * max(0, 34 - len(str(session_id)))
+    pad_ctx = ' ' * max(0, 14 - len(str(estimated_context_tokens)))
+    border = "─" * 63
+
+    print(f"\n{C_GREEN}┌{border}┐{C_RESET}")
+    print(f"{C_GREEN}│ ░▒▓ TELEMETRIA DA SESSÃO #{session_id} ▓▒░{pad_title}│{C_RESET}")
+    print(f"{C_GREEN}├{border}┤{C_RESET}")
+    print(f"{C_GREEN}│{C_RESET}  Projeto Ativo        : {project_name:<37} │")
+    print(f"{C_GREEN}│{C_RESET}  Turnos Gravados      : {len(messages_history) // 2:<37} │")
+    print(f"{C_GREEN}│{C_RESET}  Contexto Estimado    : ~{estimated_context_tokens:,} tokens ({context_chars:,} chars){pad_ctx} │")
+    print(f"{C_GREEN}│{C_RESET}  Tokens Prompt (In)   : {prompt_tok:<37,} │")
+    print(f"{C_GREEN}│{C_RESET}  Tokens Compl. (Out)  : {comp_tok:<37,} │")
+    print(f"{C_GREEN}│{C_RESET}  Total Acumulado      : {total_tok:<37,} │")
+    print(f"{C_GREEN}└{border}┘{C_RESET}\n")
 
 
 def get_environment_context() -> str:
-    """Coleta o estado do SO e ambiente ativo para injeção no roteador V3.0."""
     try:
         hostname = socket.gethostname()
         system_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
@@ -260,7 +255,6 @@ def get_environment_context() -> str:
 
 
 def build_classify_prompt(user_input: str, active_project: str, messages_history: Optional[List[Dict[str, str]]] = None) -> str:
-    """Constrói o prompt enriquecido de roteamento com injeção de estado do ambiente."""
     dynamic_skills = load_dynamic_skills(False)
     base_intents = ["chat", "session_manager", "db_migrate"]
     dynamic_intents = [s.get("intent") for s in dynamic_skills if s.get("intent")]
@@ -303,7 +297,6 @@ def build_classify_prompt(user_input: str, active_project: str, messages_history
 
 
 def get_system_instruction() -> str:
-    """Retorna a instrução do sistema base e persona da v3.0."""
     dynamic_skills = load_dynamic_skills(verbose=False)
     catalog = []
     for s in dynamic_skills:
@@ -321,7 +314,7 @@ def get_system_instruction() -> str:
         "- Você atua como Arquiteto de Software e Engenheiro Backend Senior, além de Professor Técnico.\n"
         "- Possui ampla experiência em sistemas críticos, bancos relacionais e vetoriais (Oracle PL/SQL, PostgreSQL/pgvector), APIs RESTful (Python/Node.js), ecossistemas Linux e IA local sob TDD/SDD.\n"
         "- Sua comunicação é clara, direta, estruturada e altamente didática.\n"
-        "- DELIBERAÇÃO E ARQUITETURA: Quando uma solicitação do usuário admitir mais de uma abordagem técnica viável, NÃO execute comandos precipitadamente. Apresente primeiro as opções (ex: 'Podemos seguir pela Abordagem A ou pela Abordagem B') acompanhadas dos prós e contras arquiteturais antes de agir.\n\n"
+        "- DELIBERAÇÃO E ARQUITETURA: Quando uma solicitação do usuário admitir mais de uma abordagem técnica viável, NÃO execute comandos precipitadamente. Apresente primeiro as opções acompanhadas dos prós e contras arquiteturais antes de agir.\n\n"
         "REGRAS INQUEBRÁVEIS DE ACESSO AO SISTEMA:\n"
         "1. VOCÊ TEM ACESSO TOTAL AO SISTEMA OPERACIONAL E HARDWARE VIA SKILLS.\n"
         "2. NUNCA diga 'Como modelo de IA, não tenho acesso...' ou 'Não posso verificar isso'.\n"
@@ -351,38 +344,35 @@ def start_interactive_chat(
         saved_messages = load_session_messages(current_session_id)
         if saved_messages:
             messages.extend(saved_messages)
-            print(f"🔄 Contexto da Sessão #{current_session_id} restaurado ({len(saved_messages)} mensagens).")
         else:
             current_session_id = create_session(active_project)
     else:
         current_session_id = create_session(active_project)
 
-    print("=" * 65)
-    print(f"🤖 Wygor Core Chat (ReAct Engine V3.0) - Projeto: [{active_project}] | Sessão: #{current_session_id}")
-    print("Comandos do Chat:")
-    print(" - /sessions       : Lista todas as sessões anteriores")
-    print(" - /resume <id>    : Carrega o contexto de uma sessão específica")
-    print(" - /stats          : Exibe métricas de telemetria e contexto da sessão")
-    print(" - /title <nome>   : Define um título para a sessão atual")
-    print(" - /verbose        : Liga/Desliga exibição detalhada de raciocínio")
-    print(" - /exit           : Encerra o chat")
-    print("=" * 65 + "\n")
+    border = "─" * 63
+    print(f"{C_GREEN}┌{border}┐{C_RESET}")
+    print(f"{C_GREEN}│ ░▒▓ WYGOR CORE ENGINE v4.0 :: TERMINAL INTERFACE ▓▒░         │{C_RESET}")
+    print(f"{C_GREEN}├{border}┤{C_RESET}")
+    print(f"{C_GREEN}│{C_RESET}  Projeto: {active_project:<20} │ Session: #{str(current_session_id):<17} │")
+    print(f"{C_GREEN}│{C_RESET}  Comandos: /stats | /verbose | /sessions | /resume <id> | /exit │")
+    print(f"{C_GREEN}└{border}┘{C_RESET}\n")
 
     try:
         while True:
-            status_v = " [VERBOSE ON]" if verbose_mode else ""
-            user_input = input(f"wygor({active_project}#s{current_session_id}){status_v}> ").strip()
+            status_v = " [VERBOSE]" if verbose_mode else ""
+            prompt_str = f"{C_GREEN}wygor({active_project}#s{current_session_id}){status_v}>{C_RESET} "
+            user_input = input(prompt_str).strip()
             if not user_input:
                 continue
 
             if user_input.lower() in ["/exit", "exit", "quit"]:
-                print("👋 Encerrando sessão do Wygor Chat.")
+                print(f"{C_DARK_GREEN}[+] Encerrando terminal Wygor Core.{C_RESET}")
                 summarize_and_save_session_memory(current_session_id, active_project)
                 break
 
             if user_input.lower() == "/verbose":
                 verbose_mode = not verbose_mode
-                print(f"🔍 Modo Transparente (Verbose) {'ATIVADO ✅' if verbose_mode else 'DESATIVADO ❌'}\n")
+                print(f"{C_YELLOW}[!] Modo Verbose: {'ATIVADO' if verbose_mode else 'DESATIVADO'}{C_RESET}\n")
                 continue
 
             if user_input.lower() == "/stats":
@@ -395,21 +385,15 @@ def start_interactive_chat(
 
             if user_input.lower().startswith("/resume "):
                 parts = user_input.split()
-                if len(parts) > 1:
-                    target_id = parts[1]
-                    loaded = load_session_messages(int(target_id))
+                if len(parts) > 1 and parts[1].isdigit():
+                    target_id = int(parts[1])
+                    loaded = load_session_messages(target_id)
                     if loaded:
-                        current_session_id = int(target_id)
+                        current_session_id = target_id
                         messages = [{"role": "system", "content": system_instruction}] + loaded
-                        print(f"✅ Sessão #{current_session_id} carregada com sucesso!\n")
+                        print(f"{C_GREEN}[✓] Sessão #{current_session_id} restaurada.{C_RESET}\n")
                     else:
-                        print(f"❌ Não foi possível carregar a sessão #{target_id}.\n")
-                continue
-
-            if user_input.lower().startswith("/title "):
-                new_title = user_input[7:].strip()
-                if new_title and current_session_id:
-                    run_skill_script("session_manager.py", ["rename", "--id", str(current_session_id), "--title", new_title], capture_output=False)
+                        print(f"{C_YELLOW}[!] Sessão #{target_id} não encontrada.{C_RESET}\n")
                 continue
 
             engine = ReActEngine(
@@ -420,7 +404,7 @@ def start_interactive_chat(
             )
 
             dynamic_skills = load_dynamic_skills(verbose=verbose_mode)
-            loader = AsciiLoader("🤖 Processando ReAct Engine V3.0")
+            loader = AsciiLoader("RE-ACT ENGINE RUNTIME")
             loader.start()
 
             try:
@@ -439,15 +423,17 @@ def start_interactive_chat(
             messages.append({"role": "assistant", "content": response_text})
             save_message_to_db(current_session_id, "assistant", response_text)
 
-            print(f"\n🤖 Wygor:\n{response_text}\n")
+            print(f"\n{C_DARK_GREEN}┌─── [ RESPONSE ] ────────────────────────────────────────────────────┐{C_RESET}")
+            print(f"{response_text}")
+            print(f"{C_DARK_GREEN}└─────────────────────────────────────────────────────────────────────┘{C_RESET}\n")
 
     except KeyboardInterrupt:
-        print("\n👋 Chat interrompido.")
+        print(f"\n{C_YELLOW}[!] Chat interrompido pelo usuário.{C_RESET}")
         summarize_and_save_session_memory(current_session_id, active_project)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Wygor Chat Interativo com ReAct Engine V3.0")
+    parser = argparse.ArgumentParser(description="Wygor Chat Interativo com ReAct Engine V4.0")
     parser.add_argument("-p", "--project", default="default")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--resume-last", action="store_true")

@@ -18,6 +18,11 @@ INTENÇÕES PERMITIDAS:
 MENSAGEM DO USUÁRIO:
 "{user_input}"
 
+
+REGRA DE PERSISTÊNCIA DE ARQUIVOS:
+Sempre que uma skill criar um arquivo em /tmp, registre o caminho exato no contexto da sessão (Exemplo: FILE_CREATED="/tmp/sys_telemetry.py"). 
+Em comandos subsequentes referentes ao script, consulte e utilize estritamente o FILE_CREATED.
+
 === REGRAS DE ROTEAMENTO ===
 1. Classifique como "auto_exec" se envolver comandos bash, criar/editar/executar scripts ou inspecionar o SO.
 2. Defina "deliberative_turn": true APENAS para refatorações complexas ou criação de novos projetos. Para tarefas diretas ou pequenas modificações de arquivos, defina "deliberative_turn": false.
