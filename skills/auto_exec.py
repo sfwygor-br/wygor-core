@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import time
 import subprocess
 import urllib.request
 import psycopg2
@@ -142,7 +143,8 @@ def call_qwen(prompt: str) -> Dict[str, Any]:
 
 
 def run_command(command: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> Tuple[int, str, str]:
-    print(f"\n⚙️ Executando: {command}\n" + "-" * 40)
+    start_t = time.time()
+    print(f"\n⚙️ Executando Bash: {command}\n" + "-" * 40)
     full_cmd = f"set -o pipefail; {command}"
 
     try:
@@ -155,6 +157,8 @@ def run_command(command: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> Tuple[i
             text=True
         )
         stdout, stderr = process.communicate(timeout=timeout)
+        elapsed = round(time.time() - start_t, 2)
+        print(f"⏱️ Tempo de execução Bash: {elapsed}s")
         return process.returncode, stdout, stderr
     except subprocess.TimeoutExpired:
         process.kill()

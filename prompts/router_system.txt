@@ -21,7 +21,7 @@ MENSAGEM DO USUÁRIO:
 === REGRAS OBRIGATÓRIAS DE ROTEAMENTO ===
 1. NUNCA classifique como "chat" se a solicitação envolver inspeção do SO, terminal, hardware, arquivos, execução de scripts, banco de dados ou alteração de código.
 2. Ative "use_rag": true sempre que a dúvida requerer conhecimento do repositório, documentação, decisões de arquitetura ou esquemas de banco.
-3. Para qualquer solicitação de criação, edição ou refatoração de código, comandos bash, abrir programas ou executar skills , você OBRIGATORIAMENTE deve:
+3. Para qualquer solicitação de criação, edição ou refatoração de código, comandos bash, abrir programas ou o intent exisitr no CATÁLOGO DE SKILLS DISPONÍVEIS, você OBRIGATORIAMENTE deve:
    - Definir "deliberative_turn": true.
    - Incluir a chave "test_cmd" contendo o comando exato para validar o código no SO (ex: "python3 -m unittest", "pytest", "python3 script.py").
 4. Responda ESTRITAMENTE em formato JSON VÁLIDO (sem blocos markdown ```json e sem textos adicionais):
@@ -30,7 +30,7 @@ MENSAGEM DO USUÁRIO:
   "intent": "<intencao_permitida>",
   "project": "{active_project}",
   "use_rag": true_ou_false,
-  "deliberative_turn": true_ou_false,
+  "deliberative_turn": true,
   "summary": "<diagnostico_resumido_do_problema_em_1_frase>",
   "file": "<caminho_do_arquivo_se_houver>",
   "test_cmd": "<comando_de_teste_no_so>",

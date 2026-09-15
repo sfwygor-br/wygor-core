@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import re
+import time
 import subprocess
 import urllib.request
 from typing import Dict, Any, List, Tuple, Optional, TypedDict
@@ -96,7 +97,9 @@ class ReActEngine:
             print(f"\n⚙️ [{title}]:\n{content}\n")
 
     def call_llm(self, model: str, prompt_or_messages: Any, format_json: bool = False) -> str:
-        """Dispara requisição ao Ollama para generate ou chat."""
+        """Dispara requisição ao Ollama e exibe telemetria detalhada se verbose=True."""
+        start_time = time.time()
+
         if isinstance(prompt_or_messages, list):
             sanitized = []
             for m in prompt_or_messages:
@@ -109,6 +112,7 @@ class ReActEngine:
                 "options": {"keep_alive": "30m", "num_ctx": 8192}
             }
             url = OLLAMA_CHAT_URL
+            injected_prompt_preview = json.dumps(sanitized, indent=2, ensure_ascii=False)
         else:
             payload = {
                 "model": model,
@@ -121,6 +125,10 @@ class ReActEngine:
                 payload["options"]["temperature"] = 0.0
 
             url = OLLAMA_GENERATE_URL
+            injected_prompt_preview = prompt_or_messages
+
+        # Log detalhado do prompt injetado no SLM
+        self._log(f"SLM INPUT PROMPT ({model})", injected_prompt_preview)
 
         req = urllib.request.Request(
             url,
@@ -130,9 +138,25 @@ class ReActEngine:
         try:
             with urllib.request.urlopen(req) as response:
                 res = json.loads(response.read().decode("utf-8"))
-                if isinstance(prompt_or_messages, list):
-                    return res.get("message", {}).get("content", "")
-                return res.get("response", "")
+                total_time = round(time.time() - start_time, 2)
+                
+                # Extração de métricas nativas do Ollama
+                p_tokens = res.get("prompt_eval_count", 0)
+                c_tokens = res.get("eval_count", 0)
+                eval_dur_s = (res.get("eval_duration", 0) or 1) / 1e9
+                tok_per_sec = round(c_tokens / eval_dur_s, 2) if eval_dur_s > 0 else 0.0
+
+                content = res.get("message", {}).get("content", "") if isinstance(prompt_or_messages, list) else res.get("response", "")
+
+                metrics_str = (
+                    f"⏱️ Tempo total: {total_time}s | "
+                    f"📥 Prompt Tokens: {p_tokens} | "
+                    f"📤 Completion Tokens: {c_tokens} | "
+                    f"⚡ Velocidade: {tok_per_sec} tok/s"
+                )
+
+                self._log(f"SLM OUTPUT RESPONSE ({model})", f"{content}\n\n📊 [{metrics_str}]")
+                return content
         except Exception as e:
             return f"❌ Erro na comunicação com LLM ({model}): {e}"
 
@@ -258,7 +282,7 @@ Apresente um resumo claro e técnico do código implementado e dos testes valida
                 response = self.call_llm(self.complex_model, temp_messages)
                 return response, intent_data
 
-            self._log("Closed-Loop Auto-Fix", f"Falha detectada no teste (Código de erro). Reinjetando STDERR na LLM...")
+            self._log("Closed-Loop Auto-Fix", f"Falha detectada no teste. Reinjetando STDERR na LLM...")
 
             fix_prompt = f"""
 [FALHA DE EXECUÇÃO EM RUNTIME - TENTATIVA {attempt}/{max_attempts}]
@@ -269,7 +293,7 @@ SAÍDA DE ERRO (STDERR / TRACEBACK):
 {err_test if err_test else out_test}
 
 INSTRUÇÕES DE REFATORAÇÃO:
-1. Analise o traceback e identifique a causa exata do erro (ex: erro de sintaxe, tipo incorreto, import ausente).
+1. Analise o traceback e identifique a causa exata do erro.
 2. Forneça o novo payload JSON corrigido para a skill 'code_engineer' corrigir o arquivo '{target_file}'.
 """
             raw_fix = self.call_llm(self.complex_model, fix_prompt, format_json=True)
@@ -287,12 +311,7 @@ INSTRUÇÕES DE REFATORAÇÃO:
         dynamic_skills: List[Dict[str, Any]], 
         classify_prompt_builder: Any
     ) -> Tuple[str, Dict[str, Any]]:
-        """
-        Executa o fluxo da Arquitetura V3.0:
-        1. Classificação Avançada & Early RAG Context
-        2. Deliberação e/ou Planejamento de Engenharia
-        3. Execução Real de Skill / Pipeline Closed-Loop & Análise Crítica
-        """
+        """Executa o fluxo completo do ReAct Engine V3.0."""
         # --- ETAPA 1: Classificação Avançada ---
         prompt = classify_prompt_builder(user_input, self.project_name, messages_history=messages_history)
         raw_intent = self.call_llm(self.fast_model, prompt, format_json=True)

@@ -120,8 +120,8 @@ def summarize_and_save_session_memory(session_id: Optional[int], project_name: s
 
 
 class AsciiLoader:
-    """Animação de terminal durante o processamento do ReAct Engine."""
-    def __init__(self, message: str = "Processando", min_display: float = 0.5) -> None:
+    """Animação ASCII interativa com cronômetro em tempo real durante o processamento do ReAct Engine."""
+    def __init__(self, message: str = "Processando SLM", min_display: float = 0.5) -> None:
         self.message = message
         self.min_display = min_display
         self.stop_running = False
@@ -141,17 +141,18 @@ class AsciiLoader:
         idx = 0
         self.start_time = time.time()
         while not self.stop_running:
+            elapsed = time.time() - self.start_time
             frame = self.frames[idx % len(self.frames)]
-            sys.stdout.write(f"\r🛠️  {self.message} {frame}")
+            sys.stdout.write(f"\r🛠️  {self.message} {frame} \033[93m[{elapsed:.1f}s]\033[0m")
             sys.stdout.flush()
             idx += 1
-            time.sleep(0.25)
+            time.sleep(0.1)
 
-        elapsed = time.time() - self.start_time
+        elapsed = time.time() - (self.start_time or time.time())
         if elapsed < self.min_display:
             time.sleep(self.min_display - elapsed)
 
-        sys.stdout.write("\r" + " " * 80 + "\r")
+        sys.stdout.write("\r" + " " * 85 + "\r")
         sys.stdout.flush()
 
     def start(self) -> None:
@@ -160,7 +161,7 @@ class AsciiLoader:
         self.thread.daemon = True
         self.thread.start()
 
-    def stop() -> None:
+    def stop(self) -> None:
         self.stop_running = True
         if self.thread:
             self.thread.join()
