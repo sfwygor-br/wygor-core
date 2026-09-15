@@ -12,6 +12,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from skills.model_manager import get_model_for_role
+from utils.prompt_loader import load_prompt
 
 load_dotenv()
 
@@ -152,7 +153,7 @@ class ReActEngine:
                 args_list.append(action)
 
             for k, v in intent_data.items():
-                if k not in ["intent", "project", "action", "use_rag"] and v:
+                if k not in ["intent", "project", "action", "use_rag", "deliberative_turn", "summary", "assumptions", "dependencies"] and v:
                     args_list.extend([f"--{k.replace('_', '-')}", str(v)])
 
         ok, out, err = run_skill_script(script_target, args_list, capture_output=True)
@@ -168,82 +169,112 @@ class ReActEngine:
 
     def run(self, user_input, messages_history, dynamic_skills, classify_prompt_builder):
         """
-        Executa o loop ReAct flexível:
-        1. Classificação rápida com contexto histórico (Fast Model)
-        2. Deliberação/Planejamento vs. Execução Imediata de Skill
-        3. Observation & Auto-Healing
-        4. Resposta Final / Escalada Arquitetural (Complex Model)
+        Executa o fluxo da Arquitetura V3.0:
+        1. Classificação Avançada & Early RAG Context
+        2. Deliberação e/ou Planejamento de Engenharia
+        3. Execução Real de Skill & Análise Crítica (Reviewer)
         """
-        # --- ETAPA 1: Classificação e Intent Routing com Histórico Contextual ---
+        # --- ETAPA 1: Classificação Avançada ---
         prompt = classify_prompt_builder(user_input, self.project_name, messages_history=messages_history)
         raw_intent = self.call_llm(self.fast_model, prompt, format_json=True)
 
         try:
             intent_data = json.loads(raw_intent)
         except Exception:
-            intent_data = {"intent": "chat", "project": self.project_name}
+            intent_data = {"intent": "chat", "project": self.project_name, "use_rag": False, "deliberative_turn": False}
 
         intent = intent_data.get("intent", "chat")
         use_rag = intent_data.get("use_rag", False)
         target_project = intent_data.get("project", self.project_name)
+        deliberative_turn = intent_data.get("deliberative_turn", False)
 
-        self._log(f"Decisão do Roteador ({self.fast_model})", json.dumps(intent_data, indent=2, ensure_ascii=False))
+        self._log(f"Diagnóstico do Roteador V3.0 ({self.fast_model})", json.dumps(intent_data, indent=2, ensure_ascii=False))
 
-        # --- ETAPA 2: Flexibilidade Conversacional e Deliberação ---
-        # Se a intenção for 'chat' ou envolver escolhas arquiteturais, prioriza o diálogo estruturado
+        # --- Early Context Retrieval (RAG) ---
+        rag_context = ""
+        if use_rag or intent in ["query_knowledge", "code_engineer"]:
+            self._log("Early Context RAG", "Recuperando contexto vetorial preventivo...")
+            rag_args = [user_input]
+            if target_project and str(target_project).lower() not in ["all", "global", "none", "*", "null"]:
+                rag_args.extend(["-p", target_project])
+
+            ok_rag, rag_out, _ = run_skill_script("query_knowledge.py", rag_args, capture_output=True)
+            if ok_rag and rag_out.strip():
+                rag_context = rag_out.strip()
+
         dynamic_map = {s["intent"]: s for s in dynamic_skills}
-        if intent in dynamic_map and not intent_data.get("deliberative_turn", False):
-            self._log("Action Step", f"Executando skill dinamicamente: {intent}")
+
+        # --- ETAPA 2: Camada Cognitiva e Deliberação ---
+        plan_context = ""
+        if deliberative_turn and intent not in dynamic_map:
+            # Caso de diálogo puro ou dúvida conceitual sem execução direta
+            self._log("Deliberator Turn", "Invocando análise deliberativa para diálogo...")
+            deliberative_prompt = load_prompt("deliberator_system.txt")
+            
+            temp_messages = list(messages_history)
+            temp_messages.append({"role": "system", "content": deliberative_prompt})
+            if rag_context:
+                temp_messages.append({"role": "system", "content": f"[CONTEXTO TÉCNICO RAG]:\n{rag_context}"})
+            temp_messages.append({"role": "user", "content": f"Diagnóstico do Roteador:\n{json.dumps(intent_data, ensure_ascii=False)}\n\nSolicitação: {user_input}"})
+
+            response = self.call_llm(self.complex_model, temp_messages)
+            return response, intent_data
+        elif deliberative_turn and intent in dynamic_map:
+            # Tarefa multi-passo com execução: gera o plano prévio mas NÃO interrompe a execução no SO
+            self._log("Deliberator Turn", "Gerando plano de execução prévio...")
+            deliberative_prompt = load_prompt("deliberator_system.txt")
+            temp_messages = list(messages_history)
+            temp_messages.append({"role": "system", "content": deliberative_prompt})
+            if rag_context:
+                temp_messages.append({"role": "system", "content": f"[CONTEXTO TÉCNICO RAG]:\n{rag_context}"})
+            temp_messages.append({"role": "user", "content": f"Diagnóstico do Roteador:\n{json.dumps(intent_data, ensure_ascii=False)}\n\nSolicitação: {user_input}"})
+
+            plan_context = self.call_llm(self.complex_model, temp_messages)
+            self._log("Plano Deliberado", plan_context)
+
+        # --- ETAPA 3: Execução da Action Skill & Revisão Crítica com Retorno Real ---
+        if intent in dynamic_map:
+            self._log("Action Step", f"Executando skill dinamicamente no SO: {intent}")
             ok, full_output, healed = self.execute_action(intent_data, user_input, dynamic_skills)
 
-            if ok:
-                status_msg = "Sucesso"
-                instructions = (
-                    "1. Apresente os dados e métricas capturados no terminal de forma clara e objetiva.\n"
-                    "2. Se aplicável, comente os impactos técnicos ou os próximos passos recomendados."
-                )
-            else:
-                status_msg = "Interrompido / Falha na Execução"
-                instructions = (
-                    "1. Identifique e explique o erro reportado na saída do terminal.\n"
-                    "2. Sugira a correção necessária no script/comando com postura de Arquiteto Sênior."
-                )
+            reviewer_prompt = load_prompt("reviewer_system.txt")
+            engineer_prompt = load_prompt("engineer_system.txt")
+            status_msg = "Sucesso na Execução" if ok else "Interrompido / Falha na Execução"
 
             system_feedback_prompt = f"""
-[RETORNO DA EXECUÇÃO DO TERMINAL (SKILL: '{intent}')]:
-Status da Execução: {status_msg}
-Healing Aplicado: {'Sim' if healed else 'Não'}
-Saída Capturada do Terminal:
+{reviewer_prompt}
+
+{engineer_prompt}
+
+[PLANO PRÉVIO DELIBERADO]:
+{plan_context if plan_context else 'Sem plano prévio.'}
+
+[RETORNO REAL DA EXECUÇÃO DO TERMINAL (SKILL: '{intent}')]:
+Status: {status_msg}
+Auto-Healing Aplicado: {'Sim' if healed else 'Não'}
+Saída do Terminal (STDOUT/STDERR):
 {full_output}
 
-INSTRUÇÕES OBRIGATÓRIAS DE RESPOSTA:
-{instructions}
+REGRAS CRÍTICAS DA RESPOSTA FINAL:
+1. Apresente SOMENTE os dados e saídas reais obtidos acima. NUNCA simule testes ou saídas falsas.
+2. Garanta que todo código Python gerado ou exibido utilize tipagem estrita ('TypedDict', 'dataclass' ou 'type hints').
 """
-            active_model = self.complex_model if (not ok or healed) else self.fast_model
+            active_model = self.complex_model if (not ok or healed or deliberative_turn) else self.fast_model
 
             temp_messages = list(messages_history)
             temp_messages.append({"role": "user", "content": user_input})
+            if rag_context:
+                temp_messages.append({"role": "system", "content": f"[CONTEXTO RAG RECUPERADO]:\n{rag_context}"})
             temp_messages.append({"role": "system", "content": system_feedback_prompt})
 
             response = self.call_llm(active_model, temp_messages)
             return response, intent_data
 
-        # --- ETAPA 3: Ação Conversacional / RAG / Análise de Arquitetura ---
+        # Fallback para chat padrão
         temp_messages = list(messages_history)
         temp_messages.append({"role": "user", "content": user_input})
-
-        if use_rag or intent == "query_knowledge":
-            self._log("Observation Step", "Buscando contexto na base vetorial RAG...")
-            rag_args = [user_input]
-            if target_project and str(target_project).lower() not in ["all", "global", "none", "*", "null"]:
-                rag_args.extend(["-p", target_project])
-
-            ok, rag_out, rag_err = run_skill_script("query_knowledge.py", rag_args, capture_output=True)
-            if ok and rag_out.strip():
-                temp_messages.append({
-                    "role": "system",
-                    "content": f"[DOCUMENTOS INDEXADOS RECUPERADOS DA BASE DE DADOS]:\n{rag_out.strip()}"
-                })
+        if rag_context:
+            temp_messages.append({"role": "system", "content": f"[CONTEXTO RAG]:\n{rag_context}"})
 
         response = self.call_llm(self.complex_model, temp_messages)
         return response, intent_data

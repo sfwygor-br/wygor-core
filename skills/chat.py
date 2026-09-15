@@ -8,6 +8,8 @@ import importlib.util
 import glob
 import json
 import urllib.request
+import platform
+import socket
 from dotenv import load_dotenv
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,13 +24,14 @@ from utils.agent_engine import ReActEngine, run_skill_script
 load_dotenv()
 
 ROUTER_MODEL = get_model_for_role("router", default="qwen2.5-coder:3b")
-CHAT_MODEL = get_model_for_role("complex", default="qwen2.5-coder:3b")
+CHAT_MODEL = get_model_for_role("complex", default="qwen2.5-coder:7b")
 OLLAMA_EMBED_URL = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/embeddings"
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 SKILLS_DIR = os.path.join(PROJECT_ROOT, "skills")
 
 
 def load_dynamic_skills(verbose=False):
+    """Carrega dinamicamente os manifestos de skills registrados no diretório /skills."""
     skills = []
     if os.path.exists(SKILLS_DIR):
         for file in glob.glob(os.path.join(SKILLS_DIR, "*.py")):
@@ -51,6 +54,7 @@ def load_dynamic_skills(verbose=False):
 
 
 def get_embedding(text):
+    """Gera o vetor de embedding para a memória episódica."""
     payload = {"model": EMBED_MODEL, "prompt": text[:4000]}
     req = urllib.request.Request(
         OLLAMA_EMBED_URL,
@@ -67,6 +71,7 @@ def get_embedding(text):
 
 
 def summarize_and_save_session_memory(session_id, project_name):
+    """Sintetiza e persiste a memória episódica da sessão no pgvector."""
     if not session_id:
         return
 
@@ -114,6 +119,7 @@ def summarize_and_save_session_memory(session_id, project_name):
 
 
 class AsciiLoader:
+    """Animação de terminal durante o processamento do ReAct Engine."""
     def __init__(self, message="Processando", min_display=0.5):
         self.message = message
         self.min_display = min_display
@@ -234,7 +240,19 @@ def display_session_stats(session_id, project_name, messages_history):
     print("=" * 55 + "\n")
 
 
+def get_environment_context():
+    """Coleta o estado do SO e ambiente ativo para injeção no roteador V3.0."""
+    try:
+        hostname = socket.gethostname()
+        system_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
+        python_ver = platform.python_version()
+        return f"Hostname: {hostname} | SO: {system_info} | Python: {python_ver} | Dir: {PROJECT_ROOT}"
+    except Exception:
+        return "Ambiente Linux / Parrot OS / Ubuntu Server"
+
+
 def build_classify_prompt(user_input, active_project, messages_history=None):
+    """Constrói o prompt enriquecido de roteamento com injeção de estado do ambiente."""
     dynamic_skills = load_dynamic_skills(False)
     base_intents = ["chat", "session_manager", "db_migrate"]
     dynamic_intents = [s.get("intent") for s in dynamic_skills if s.get("intent")]
@@ -263,17 +281,21 @@ def build_classify_prompt(user_input, active_project, messages_history=None):
                 formatted_msgs.append(f"{role_label}: {preview}")
             history_text = "\n".join(formatted_msgs)
 
+    env_context = get_environment_context()
+
     return load_prompt(
         "router_system.txt",
         allowed_intents_str=allowed_intents_str,
         skills_text=skills_text,
         active_project=active_project,
         user_input=user_input,
+        env_context=env_context,
         chat_history=history_text if history_text else "Sem histórico recente."
     )
 
 
 def get_system_instruction():
+    """Retorna a instrução do sistema base e persona da v3.0."""
     dynamic_skills = load_dynamic_skills(verbose=False)
     catalog = []
     for s in dynamic_skills:
@@ -323,7 +345,7 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
         current_session_id = create_session(active_project)
 
     print("=" * 65)
-    print(f"🤖 Wygor Core Chat (ReAct Engine) - Projeto: [{active_project}] | Sessão: #{current_session_id}")
+    print(f"🤖 Wygor Core Chat (ReAct Engine V3.0) - Projeto: [{active_project}] | Sessão: #{current_session_id}")
     print("Comandos do Chat:")
     print(" - /sessions       : Lista todas as sessões anteriores")
     print(" - /resume <id>    : Carrega o contexto de uma sessão específica")
@@ -385,7 +407,7 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
             )
 
             dynamic_skills = load_dynamic_skills(verbose=verbose_mode)
-            loader = AsciiLoader("🤖 Processando ReAct Engine")
+            loader = AsciiLoader("🤖 Processando ReAct Engine V3.0")
             loader.start()
 
             try:
@@ -412,7 +434,7 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Wygor Chat Interativo com ReAct Engine")
+    parser = argparse.ArgumentParser(description="Wygor Chat Interativo com ReAct Engine V3.0")
     parser.add_argument("-p", "--project", default="default")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--resume-last", action="store_true")
