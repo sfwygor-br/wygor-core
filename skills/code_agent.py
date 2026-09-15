@@ -2,6 +2,7 @@
 import os
 import sys
 import argparse
+from typing import List, Dict, Any
 from dotenv import load_dotenv
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -13,11 +14,18 @@ from utils.agent_engine import ReActEngine, run_skill_script
 
 load_dotenv()
 
-FAST_MODEL = get_model_for_role("router", default="qwen2.5-coder:3b")
-COMPLEX_MODEL = get_model_for_role("complex", default="qwen2.5-coder:7b")
+FAST_MODEL: str = get_model_for_role("router", default="qwen2.5-coder:3b")
+COMPLEX_MODEL: str = get_model_for_role("complex", default="qwen2.5-coder:7b")
 
 
-def run_agent_task(prompt_task, project_path=".", project_name="default", max_retries=3, no_tests=False, verbose=False):
+def run_agent_task(
+    prompt_task: str, 
+    project_path: str = ".", 
+    project_name: str = "default", 
+    max_retries: int = 3, 
+    no_tests: bool = False, 
+    verbose: bool = False
+) -> bool:
     print(f"\n🤖 [WYGOR CODE AGENT] Iniciando tarefa: '{prompt_task}'\n")
 
     # 1. Isolamento via Git Guard
@@ -55,15 +63,14 @@ DIRETRIZES:
     ]
 
     # Mapeamento sintético das ferramentas de código
-    code_skills = [
+    code_skills: List[Dict[str, Any]] = [
         {"intent": "query_knowledge", "script": "query_knowledge.py", "description": "Busca contexto técnico na base vetorial"},
         {"intent": "code_engineer", "script": "code_engineer.py", "description": "Escreve e altera arquivos no projeto"},
         {"intent": "code_checker", "script": "code_checker.py", "description": "Executa a suíte de testes unitários"}
     ]
 
-    def dummy_classifier(user_input, active_project):
-        # O agente de código sempre direciona para engenharia de código complexa
-        return f'{{"intent": "code_engineer", "project": "{active_project}", "use_rag": true}}'
+    def dummy_classifier(user_input: str, active_project: str, messages_history: Any = None) -> str:
+        return f'{{"intent": "code_engineer", "project": "{active_project}", "use_rag": true, "test_cmd": "python3 skills/code_checker.py {project_path}"}}'
 
     # 4. Execução guiada por metas via Engine
     response_text, _ = engine.run(

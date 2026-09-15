@@ -3,27 +3,11 @@ import os
 import sys
 import argparse
 import subprocess
-import psycopg2
-import json
-import urllib.request
-from dotenv import load_dotenv
-
-load_dotenv()
+from typing import Optional
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WYGOR_CORE_DIR = os.path.dirname(SCRIPT_DIR)
 
-# Configurações do Banco e Ollama
-OLLAMA_EMBED_URL = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/embeddings"
-EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-
-DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "postgres")
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASS = os.getenv("DB_PASS", "root")
-
-def fetch_context(query, project_name, limit=3):
+def fetch_context(query: str, project_name: str, limit: int = 3) -> str:
     """Busca trechos do projeto via RAG para contexto de engenharia."""
     try:
         query_knowledge_script = os.path.join(SCRIPT_DIR, "query_knowledge.py")
@@ -37,7 +21,7 @@ def fetch_context(query, project_name, limit=3):
         print(f"⚠️ Erro ao recuperar contexto: {e}", file=sys.stderr)
         return ""
 
-def write_file(target_path, content, overwrite=False):
+def write_file(target_path: str, content: str, overwrite: bool = False) -> bool:
     """Cria ou substitui o conteúdo de um arquivo."""
     abs_path = os.path.abspath(target_path)
     dir_name = os.path.dirname(abs_path)
@@ -47,7 +31,7 @@ def write_file(target_path, content, overwrite=False):
         print(f"📁 Diretório criado: {dir_name}")
 
     if os.path.exists(abs_path) and not overwrite:
-        print(f"⚠️ O arquivo '{target_path}' já existe. Use --overwrite para sobrescrever.")
+        print(f"⚠️ O arquivo '{target_path}' já existe. Use --overwrite para sobrescrever.", file=sys.stderr)
         return False
 
     with open(abs_path, "w", encoding="utf-8") as f:
@@ -56,7 +40,7 @@ def write_file(target_path, content, overwrite=False):
     print(f"✅ Arquivo salvo com sucesso: {target_path}")
     return True
 
-def replace_in_file(target_path, old_text, new_text):
+def replace_in_file(target_path: str, old_text: str, new_text: str) -> bool:
     """Substitui um trecho exato de texto dentro de um arquivo existente."""
     abs_path = os.path.abspath(target_path)
     if not os.path.exists(abs_path):
@@ -77,17 +61,6 @@ def replace_in_file(target_path, old_text, new_text):
     print(f"📝 Trecho atualizado com sucesso em: {target_path}")
     return True
 
-def auto_commit(repo_path, commit_message):
-    """Chama a skill git_guard para registrar o commit local."""
-    try:
-        git_guard_script = os.path.join(SCRIPT_DIR, "git_guard.py")
-        subprocess.run(
-            [sys.executable, git_guard_script, "commit", repo_path, "-m", commit_message],
-            check=True
-        )
-    except Exception as e:
-        print(f"⚠️ Não foi possível registrar o commit automaticamente: {e}", file=sys.stderr)
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Skill de Engenharia e Edição de Código do Wygor Core")
     subparsers = parser.add_subparsers(dest="action", help="Ação de engenharia")
@@ -97,16 +70,12 @@ if __name__ == "__main__":
     write_parser.add_argument("file", help="Caminho do arquivo de destino")
     write_parser.add_argument("--content", required=True, help="Conteúdo do arquivo")
     write_parser.add_argument("--overwrite", action="store_true", help="Permite sobrescrever se existir")
-    write_parser.add_argument("-repo", "--repository", default=".", help="Caminho do repositório para o commit")
-    write_parser.add_argument("-m", "--message", help="Mensagem do commit após a escrita")
 
     # Ação: patch (substituir trecho)
     patch_parser = subparsers.add_parser("patch", help="Substitui um trecho de código específico")
     patch_parser.add_argument("file", help="Caminho do arquivo")
     patch_parser.add_argument("--old", required=True, help="Texto/Bloco antigo a ser substituído")
     patch_parser.add_argument("--new", required=True, help="Novo texto/bloco")
-    patch_parser.add_argument("-repo", "--repository", default=".", help="Caminho do repositório para o commit")
-    patch_parser.add_argument("-m", "--message", help="Mensagem do commit após a alteração")
 
     # Ação: context (consulta contexto para a tarefa)
     ctx_parser = subparsers.add_parser("context", help="Busca o contexto de código existente via RAG")
@@ -117,15 +86,14 @@ if __name__ == "__main__":
 
     if args.action == "write":
         success = write_file(args.file, args.content, overwrite=args.overwrite)
-        if success and args.message:
-            auto_commit(args.repository, args.message)
+        sys.exit(0 if success else 1)
     elif args.action == "patch":
         success = replace_in_file(args.file, args.old, args.new)
-        if success and args.message:
-            auto_commit(args.repository, args.message)
+        sys.exit(0 if success else 1)
     elif args.action == "context":
         ctx = fetch_context(args.query, args.project)
-        print("🔍 Contexto RelevanteEncontrado:\n")
+        print("🔍 Contexto Relevante Encontrado:\n")
         print(ctx)
     else:
         parser.print_help()
+        sys.exit(1)

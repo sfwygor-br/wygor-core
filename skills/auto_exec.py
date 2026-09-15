@@ -6,6 +6,7 @@ import subprocess
 import urllib.request
 import psycopg2
 from datetime import datetime
+from typing import Dict, Any, List, Tuple, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,7 +17,7 @@ if PROJECT_ROOT not in sys.path:
 
 from utils.db_service import get_model_for_role
 
-SKILL_MANIFEST = {
+SKILL_MANIFEST: Dict[str, Any] = {
     "intent": "auto_exec",
     "description": "Executa comandos bash no terminal Linux para interagir com o SO, sistema de arquivos, rede, hardware e processos.",
     "allowed_actions": ["execute"],
@@ -24,26 +25,26 @@ SKILL_MANIFEST = {
     "script": "skills/auto_exec.py"
 }
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
-OLLAMA_EMBED_URL = f"{OLLAMA_BASE_URL}/api/embeddings"
-MODEL_LLM = get_model_for_role("complex", default="qwen2.5-coder:3b", env_var="OLLAMA_LLM_MODEL")
-MODEL_EMBED = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+OLLAMA_BASE_URL: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_GENERATE_URL: str = f"{OLLAMA_BASE_URL}/api/generate"
+OLLAMA_EMBED_URL: str = f"{OLLAMA_BASE_URL}/api/embeddings"
+MODEL_LLM: str = get_model_for_role("complex", default="qwen2.5-coder:3b", env_var="OLLAMA_LLM_MODEL")
+MODEL_EMBED: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
-DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "postgres")
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASS = os.getenv("DB_PASS", "root")
+DB_HOST: str = os.getenv("DB_HOST", "127.0.0.1")
+DB_PORT: str = os.getenv("DB_PORT", "5432")
+DB_NAME: str = os.getenv("DB_NAME", "postgres")
+DB_USER: str = os.getenv("DB_USER", "postgres")
+DB_PASS: str = os.getenv("DB_PASS", "root")
 
-MAX_RETRIES = 3
-DEFAULT_TIMEOUT_SECONDS = 200
-LOG_DIR = os.path.join(PROJECT_ROOT, "memory")
-LOG_FILE = os.path.join(LOG_DIR, "execution_trace.jsonl")
-TROUBLESHOOTING_FILE = os.path.join(LOG_DIR, "troubleshooting.md")
+MAX_RETRIES: int = 3
+DEFAULT_TIMEOUT_SECONDS: int = 200
+LOG_DIR: str = os.path.join(PROJECT_ROOT, "memory")
+LOG_FILE: str = os.path.join(LOG_DIR, "execution_trace.jsonl")
+TROUBLESHOOTING_FILE: str = os.path.join(LOG_DIR, "troubleshooting.md")
 
 
-def get_embedding(text):
+def get_embedding(text: str) -> List[float]:
     payload = {"model": MODEL_EMBED, "prompt": text[:4000]}
     req = urllib.request.Request(
         OLLAMA_EMBED_URL,
@@ -58,7 +59,7 @@ def get_embedding(text):
         return []
 
 
-def retrieve_rag_context(query, limit=3):
+def retrieve_rag_context(query: str, limit: int = 3) -> str:
     embedding = get_embedding(query)
     if not embedding:
         return ""
@@ -89,7 +90,7 @@ def retrieve_rag_context(query, limit=3):
         return ""
 
 
-def save_learned_fix(task, failed_attempt, successful_command):
+def save_learned_fix(task: str, failed_attempt: Dict[str, Any], successful_command: str) -> None:
     os.makedirs(LOG_DIR, exist_ok=True)
     entry = f"""
 ## Resolução de Problema - {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -114,7 +115,7 @@ def save_learned_fix(task, failed_attempt, successful_command):
         print(f"⚠️ Falha ao re-indexar aprendizado: {e}")
 
 
-def call_qwen(prompt):
+def call_qwen(prompt: str) -> Dict[str, Any]:
     payload = {
         "model": MODEL_LLM,
         "prompt": prompt,
@@ -140,7 +141,7 @@ def call_qwen(prompt):
         sys.exit(1)
 
 
-def run_command(command, timeout=DEFAULT_TIMEOUT_SECONDS):
+def run_command(command: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> Tuple[int, str, str]:
     print(f"\n⚙️ Executando: {command}\n" + "-" * 40)
     full_cmd = f"set -o pipefail; {command}"
 
@@ -162,17 +163,17 @@ def run_command(command, timeout=DEFAULT_TIMEOUT_SECONDS):
         return 124, stdout or "", err_msg
 
 
-def log_trace(trace_data):
+def log_trace(trace_data: Dict[str, Any]) -> None:
     os.makedirs(LOG_DIR, exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(trace_data, ensure_ascii=False) + "\n")
 
 
-def auto_heal(task_description):
+def auto_heal(task_description: str) -> Tuple[bool, Dict[str, Any]]:
     print(f"🚀 Iniciando Auto-Exec para: {task_description}")
     rag_context = retrieve_rag_context(task_description)
 
-    trace = {
+    trace: Dict[str, Any] = {
         "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
         "timestamp": datetime.now().isoformat(),
         "task": task_description,
@@ -258,7 +259,7 @@ Reescreva o comando corrigindo os erros mantendo a regra dos 3 níveis."""
     return False, trace
 
 
-def print_metrics(trace):
+def print_metrics(trace: Dict[str, Any]) -> None:
     total_tokens = trace["total_prompt_tokens"] + trace["total_completion_tokens"]
     print("\n" + "=" * 50)
     print("📊 MÉTRICAS DE EXECUÇÃO E RASTREABILIDADE")

@@ -10,6 +10,7 @@ import json
 import urllib.request
 import platform
 import socket
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,16 +24,16 @@ from utils.agent_engine import ReActEngine, run_skill_script
 
 load_dotenv()
 
-ROUTER_MODEL = get_model_for_role("router", default="qwen2.5-coder:3b")
-CHAT_MODEL = get_model_for_role("complex", default="qwen2.5-coder:7b")
-OLLAMA_EMBED_URL = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/embeddings"
-EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-SKILLS_DIR = os.path.join(PROJECT_ROOT, "skills")
+ROUTER_MODEL: str = get_model_for_role("router", default="qwen2.5-coder:3b")
+CHAT_MODEL: str = get_model_for_role("complex", default="qwen2.5-coder:7b")
+OLLAMA_EMBED_URL: str = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/embeddings"
+EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+SKILLS_DIR: str = os.path.join(PROJECT_ROOT, "skills")
 
 
-def load_dynamic_skills(verbose=False):
+def load_dynamic_skills(verbose: bool = False) -> List[Dict[str, Any]]:
     """Carrega dinamicamente os manifestos de skills registrados no diretório /skills."""
-    skills = []
+    skills: List[Dict[str, Any]] = []
     if os.path.exists(SKILLS_DIR):
         for file in glob.glob(os.path.join(SKILLS_DIR, "*.py")):
             mod_name = os.path.basename(file)[:-3]
@@ -53,7 +54,7 @@ def load_dynamic_skills(verbose=False):
     return skills
 
 
-def get_embedding(text):
+def get_embedding(text: str) -> List[float]:
     """Gera o vetor de embedding para a memória episódica."""
     payload = {"model": EMBED_MODEL, "prompt": text[:4000]}
     req = urllib.request.Request(
@@ -70,7 +71,7 @@ def get_embedding(text):
         return []
 
 
-def summarize_and_save_session_memory(session_id, project_name):
+def summarize_and_save_session_memory(session_id: Optional[int], project_name: str) -> None:
     """Sintetiza e persiste a memória episódica da sessão no pgvector."""
     if not session_id:
         return
@@ -120,12 +121,12 @@ def summarize_and_save_session_memory(session_id, project_name):
 
 class AsciiLoader:
     """Animação de terminal durante o processamento do ReAct Engine."""
-    def __init__(self, message="Processando", min_display=0.5):
+    def __init__(self, message: str = "Processando", min_display: float = 0.5) -> None:
         self.message = message
         self.min_display = min_display
         self.stop_running = False
-        self.thread = None
-        self.start_time = None
+        self.thread: Optional[threading.Thread] = None
+        self.start_time: Optional[float] = None
         self.frames = [
             r"  o>  /|    .  ",
             r"  o_  /|   .   ",
@@ -136,7 +137,7 @@ class AsciiLoader:
             r"  o>           "
         ]
 
-    def _animate(self):
+    def _animate(self) -> None:
         idx = 0
         self.start_time = time.time()
         while not self.stop_running:
@@ -153,19 +154,19 @@ class AsciiLoader:
         sys.stdout.write("\r" + " " * 80 + "\r")
         sys.stdout.flush()
 
-    def start(self):
+    def start(self) -> None:
         self.stop_running = False
         self.thread = threading.Thread(target=self._animate)
         self.thread.daemon = True
         self.thread.start()
 
-    def stop(self):
+    def stop() -> None:
         self.stop_running = True
         if self.thread:
             self.thread.join()
 
 
-def create_session(project_name, title="Nova Sessão"):
+def create_session(project_name: str, title: str = "Nova Sessão") -> Optional[int]:
     sql = "INSERT INTO chat_sessions (project_name, title) VALUES (%s, %s) RETURNING id;"
     try:
         row = execute_query(sql, (project_name, title), fetch="one")
@@ -174,7 +175,13 @@ def create_session(project_name, title="Nova Sessão"):
         return None
 
 
-def save_message_to_db(session_id, role, content, prompt_tokens=0, completion_tokens=0):
+def save_message_to_db(
+    session_id: Optional[int], 
+    role: str, 
+    content: str, 
+    prompt_tokens: int = 0, 
+    completion_tokens: int = 0
+) -> None:
     if not session_id:
         return
     try:
@@ -196,7 +203,7 @@ def save_message_to_db(session_id, role, content, prompt_tokens=0, completion_to
         pass
 
 
-def load_session_messages(session_id):
+def load_session_messages(session_id: int) -> List[Dict[str, str]]:
     sql = "SELECT role, content FROM chat_messages WHERE session_id = %s ORDER BY id ASC;"
     try:
         rows = execute_query(sql, (session_id,), commit=False, fetch="all") or []
@@ -205,7 +212,7 @@ def load_session_messages(session_id):
         return []
 
 
-def get_last_session_id(project_name):
+def get_last_session_id(project_name: str) -> Optional[int]:
     sql = "SELECT id FROM chat_sessions WHERE project_name = %s ORDER BY updated_at DESC LIMIT 1;"
     try:
         row = execute_query(sql, (project_name,), commit=False, fetch="one")
@@ -214,7 +221,7 @@ def get_last_session_id(project_name):
         return None
 
 
-def display_session_stats(session_id, project_name, messages_history):
+def display_session_stats(session_id: Optional[int], project_name: str, messages_history: List[Dict[str, str]]) -> None:
     """Exibe a telemetria e o consumo da sessão atual."""
     sql = """
         SELECT COALESCE(total_prompt_tokens, 0), 
@@ -240,7 +247,7 @@ def display_session_stats(session_id, project_name, messages_history):
     print("=" * 55 + "\n")
 
 
-def get_environment_context():
+def get_environment_context() -> str:
     """Coleta o estado do SO e ambiente ativo para injeção no roteador V3.0."""
     try:
         hostname = socket.gethostname()
@@ -251,7 +258,7 @@ def get_environment_context():
         return "Ambiente Linux / Parrot OS / Ubuntu Server"
 
 
-def build_classify_prompt(user_input, active_project, messages_history=None):
+def build_classify_prompt(user_input: str, active_project: str, messages_history: Optional[List[Dict[str, str]]] = None) -> str:
     """Constrói o prompt enriquecido de roteamento com injeção de estado do ambiente."""
     dynamic_skills = load_dynamic_skills(False)
     base_intents = ["chat", "session_manager", "db_migrate"]
@@ -294,7 +301,7 @@ def build_classify_prompt(user_input, active_project, messages_history=None):
     )
 
 
-def get_system_instruction():
+def get_system_instruction() -> str:
     """Retorna a instrução do sistema base e persona da v3.0."""
     dynamic_skills = load_dynamic_skills(verbose=False)
     catalog = []
@@ -323,7 +330,12 @@ def get_system_instruction():
     )
 
 
-def start_interactive_chat(project_name="default", initial_verbose=True, resume_last=True, session_id=None):
+def start_interactive_chat(
+    project_name: str = "default", 
+    initial_verbose: bool = True, 
+    resume_last: bool = True, 
+    session_id: Optional[int] = None
+) -> None:
     active_project = project_name
     verbose_mode = initial_verbose
     current_session_id = session_id
@@ -384,7 +396,7 @@ def start_interactive_chat(project_name="default", initial_verbose=True, resume_
                 parts = user_input.split()
                 if len(parts) > 1:
                     target_id = parts[1]
-                    loaded = load_session_messages(target_id)
+                    loaded = load_session_messages(int(target_id))
                     if loaded:
                         current_session_id = int(target_id)
                         messages = [{"role": "system", "content": system_instruction}] + loaded

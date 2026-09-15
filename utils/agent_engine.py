@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import urllib.request
+from typing import Dict, Any, List, Tuple, Optional, TypedDict
 from dotenv import load_dotenv
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,13 +23,21 @@ OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 SKILLS_DIR = os.path.join(PROJECT_ROOT, "skills")
 
 
-def sanitize_for_json(text):
+class ExecutionTrace(TypedDict):
+    attempt: int
+    success: bool
+    stdout: str
+    stderr: str
+    code_updated: bool
+
+
+def sanitize_for_json(text: str) -> str:
     if not text:
         return ""
     return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
 
 
-def run_skill_script(script_name, args_list, capture_output=True):
+def run_skill_script(script_name: str, args_list: List[str], capture_output: bool = True) -> Tuple[bool, str, str]:
     """Executa um script de skill no ambiente Python atual."""
     if os.path.isabs(script_name):
         script_path = script_name
@@ -51,7 +60,7 @@ def run_skill_script(script_name, args_list, capture_output=True):
         return False, "", str(e)
 
 
-def detect_and_install_missing_module(error_log):
+def detect_and_install_missing_module(error_log: str) -> Tuple[bool, Optional[str]]:
     """Healing: detecta módulos Python ausentes e tenta instalar via pip."""
     match = re.search(r"ModuleNotFoundError: No module named '(\w+)'", error_log)
     if match:
@@ -68,18 +77,25 @@ def detect_and_install_missing_module(error_log):
 
 
 class ReActEngine:
-    def __init__(self, fast_model=None, complex_model=None, project_name="default", max_steps=5, verbose=False):
-        self.fast_model = fast_model or get_model_for_role("router", default="qwen2.5-coder:3b")
-        self.complex_model = complex_model or get_model_for_role("complex", default="qwen2.5-coder:7b")
-        self.project_name = project_name
-        self.max_steps = max_steps
-        self.verbose = verbose
+    def __init__(
+        self, 
+        fast_model: Optional[str] = None, 
+        complex_model: Optional[str] = None, 
+        project_name: str = "default", 
+        max_steps: int = 5, 
+        verbose: bool = False
+    ) -> None:
+        self.fast_model: str = fast_model or get_model_for_role("router", default="qwen2.5-coder:3b")
+        self.complex_model: str = complex_model or get_model_for_role("complex", default="qwen2.5-coder:7b")
+        self.project_name: str = project_name
+        self.max_steps: int = max_steps
+        self.verbose: bool = verbose
 
-    def _log(self, title, content):
+    def _log(self, title: str, content: str) -> None:
         if self.verbose:
             print(f"\n⚙️ [{title}]:\n{content}\n")
 
-    def call_llm(self, model, prompt_or_messages, format_json=False):
+    def call_llm(self, model: str, prompt_or_messages: Any, format_json: bool = False) -> str:
         """Dispara requisição ao Ollama para generate ou chat."""
         if isinstance(prompt_or_messages, list):
             sanitized = []
@@ -120,7 +136,7 @@ class ReActEngine:
         except Exception as e:
             return f"❌ Erro na comunicação com LLM ({model}): {e}"
 
-    def auto_heal(self, full_output):
+    def auto_heal(self, full_output: str) -> Tuple[bool, Optional[str]]:
         """Aplica regras automáticas de Auto-Healing."""
         if any(err in full_output for err in ["ERR_MISSING_TABLE", "UndefinedTable", "does not exist"]):
             self._log("Healing Triggered", "Tabela ausente detectada. Executando db_migrate.py apply...")
@@ -133,7 +149,12 @@ class ReActEngine:
 
         return False, None
 
-    def execute_action(self, intent_data, user_input, dynamic_skills):
+    def execute_action(
+        self, 
+        intent_data: Dict[str, Any], 
+        user_input: str, 
+        dynamic_skills: List[Dict[str, Any]]
+    ) -> Tuple[bool, str, bool]:
         """Mapeia a intenção e executa a Skill no SO."""
         intent = intent_data.get("intent", "chat")
         dynamic_map = {s["intent"]: s for s in dynamic_skills}
@@ -153,7 +174,7 @@ class ReActEngine:
                 args_list.append(action)
 
             for k, v in intent_data.items():
-                if k not in ["intent", "project", "action", "use_rag", "deliberative_turn", "summary", "assumptions", "dependencies"] and v:
+                if k not in ["intent", "project", "action", "use_rag", "deliberative_turn", "summary", "assumptions", "dependencies", "test_cmd"] and v:
                     args_list.extend([f"--{k.replace('_', '-')}", str(v)])
 
         ok, out, err = run_skill_script(script_target, args_list, capture_output=True)
@@ -167,12 +188,110 @@ class ReActEngine:
 
         return ok, full_output, healed
 
-    def run(self, user_input, messages_history, dynamic_skills, classify_prompt_builder):
+    def execute_engineering_pipeline(
+        self, 
+        user_input: str, 
+        intent_data: Dict[str, Any], 
+        dynamic_skills: List[Dict[str, Any]], 
+        messages_history: List[Dict[str, str]], 
+        max_attempts: int = 3
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Executa o Pipeline de Engenharia em Malha Fechada (Closed-Loop):
+        1. Altera/Cria arquivo via code_engineer.py (sem commit prévio).
+        2. Executa o teste/comando via auto_exec.py ou code_checker.py no SO.
+        3. Se aprovação (returncode == 0): Dispara git_guard.py para commit validado.
+        4. Se falha (returncode != 0): Injeta STDERR na LLM para re-gravação e re-teste.
+        """
+        test_cmd: str = intent_data.get("test_cmd", "python3 -m unittest")
+        target_file: Optional[str] = intent_data.get("file")
+        repo_path: str = intent_data.get("repository", ".")
+
+        self._log("Closed-Loop Pipeline", f"Iniciando ciclo autônomo de engenharia para: {user_input}")
+
+        for attempt in range(1, max_attempts + 1):
+            self._log("Loop Step", f"Tentativa {attempt}/{max_attempts} - Gravando alterações de código...")
+
+            ok_code, out_code, healed_code = self.execute_action(intent_data, user_input, dynamic_skills)
+            if not ok_code:
+                return f"❌ Falha na etapa de escrita do código: {out_code}", intent_data
+
+            self._log("Loop Step", f"Executando validação em runtime: `{test_cmd}`")
+            ok_test, out_test, err_test = run_skill_script(
+                "auto_exec.py", 
+                [test_cmd], 
+                capture_output=True
+            )
+
+            if ok_test and "ERROR:" not in err_test and "Traceback" not in err_test:
+                self._log("Closed-Loop Success", "Validação concluída com sucesso! Disparando Git Commit Validado...")
+
+                commit_msg = f"feat(auto-fix): {intent_data.get('summary', 'refatoracao validada em malha fechada')}"
+                ok_git, out_git, err_git = run_skill_script(
+                    "git_guard.py", 
+                    ["commit", repo_path, "-m", commit_msg], 
+                    capture_output=True
+                )
+
+                reviewer_prompt = load_prompt("reviewer_system.txt")
+                engineer_prompt = load_prompt("engineer_system.txt")
+
+                final_system_prompt = f"""
+{reviewer_prompt}
+
+{engineer_prompt}
+
+[PIPELINE EM MALHA FECHADA - CONCLUÍDO COM SUCESSO]:
+- Tentativas realizadas: {attempt}
+- Validação executada: `{test_cmd}`
+- Git Commit: Registrado com sucesso (`{commit_msg}`)
+
+SAÍDA REAL DO TESTE (STDOUT):
+{out_test}
+
+Apresente um resumo claro e técnico do código implementado e dos testes validados.
+"""
+                temp_messages = list(messages_history)
+                temp_messages.append({"role": "user", "content": user_input})
+                temp_messages.append({"role": "system", "content": final_system_prompt})
+
+                response = self.call_llm(self.complex_model, temp_messages)
+                return response, intent_data
+
+            self._log("Closed-Loop Auto-Fix", f"Falha detectada no teste (Código de erro). Reinjetando STDERR na LLM...")
+
+            fix_prompt = f"""
+[FALHA DE EXECUÇÃO EM RUNTIME - TENTATIVA {attempt}/{max_attempts}]
+O código foi alterado, mas o comando de teste falhou no SO.
+
+COMANDO EXECUTADO: `{test_cmd}`
+SAÍDA DE ERRO (STDERR / TRACEBACK):
+{err_test if err_test else out_test}
+
+INSTRUÇÕES DE REFATORAÇÃO:
+1. Analise o traceback e identifique a causa exata do erro (ex: erro de sintaxe, tipo incorreto, import ausente).
+2. Forneça o novo payload JSON corrigido para a skill 'code_engineer' corrigir o arquivo '{target_file}'.
+"""
+            raw_fix = self.call_llm(self.complex_model, fix_prompt, format_json=True)
+            try:
+                intent_data = json.loads(raw_fix)
+            except Exception:
+                pass
+
+        return f"❌ Limite de {max_attempts} tentativas atingido sem aprovação nos testes.\nÚltimo Erro:\n{err_test}", intent_data
+
+    def run(
+        self, 
+        user_input: str, 
+        messages_history: List[Dict[str, str]], 
+        dynamic_skills: List[Dict[str, Any]], 
+        classify_prompt_builder: Any
+    ) -> Tuple[str, Dict[str, Any]]:
         """
         Executa o fluxo da Arquitetura V3.0:
         1. Classificação Avançada & Early RAG Context
         2. Deliberação e/ou Planejamento de Engenharia
-        3. Execução Real de Skill & Análise Crítica (Reviewer)
+        3. Execução Real de Skill / Pipeline Closed-Loop & Análise Crítica
         """
         # --- ETAPA 1: Classificação Avançada ---
         prompt = classify_prompt_builder(user_input, self.project_name, messages_history=messages_history)
@@ -204,10 +323,13 @@ class ReActEngine:
 
         dynamic_map = {s["intent"]: s for s in dynamic_skills}
 
-        # --- ETAPA 2: Camada Cognitiva e Deliberação ---
+        # --- ETAPA 2: Pipeline de Engenharia Closed-Loop (code_engineer) ---
+        if intent == "code_engineer":
+            return self.execute_engineering_pipeline(user_input, intent_data, dynamic_skills, messages_history)
+
+        # --- ETAPA 3: Camada Cognitiva e Deliberação ---
         plan_context = ""
         if deliberative_turn and intent not in dynamic_map:
-            # Caso de diálogo puro ou dúvida conceitual sem execução direta
             self._log("Deliberator Turn", "Invocando análise deliberativa para diálogo...")
             deliberative_prompt = load_prompt("deliberator_system.txt")
             
@@ -220,7 +342,6 @@ class ReActEngine:
             response = self.call_llm(self.complex_model, temp_messages)
             return response, intent_data
         elif deliberative_turn and intent in dynamic_map:
-            # Tarefa multi-passo com execução: gera o plano prévio mas NÃO interrompe a execução no SO
             self._log("Deliberator Turn", "Gerando plano de execução prévio...")
             deliberative_prompt = load_prompt("deliberator_system.txt")
             temp_messages = list(messages_history)
@@ -232,7 +353,7 @@ class ReActEngine:
             plan_context = self.call_llm(self.complex_model, temp_messages)
             self._log("Plano Deliberado", plan_context)
 
-        # --- ETAPA 3: Execução da Action Skill & Revisão Crítica com Retorno Real ---
+        # --- ETAPA 4: Execução da Action Skill Padrão ---
         if intent in dynamic_map:
             self._log("Action Step", f"Executando skill dinamicamente no SO: {intent}")
             ok, full_output, healed = self.execute_action(intent_data, user_input, dynamic_skills)

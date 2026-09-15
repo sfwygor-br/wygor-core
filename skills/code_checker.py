@@ -4,8 +4,9 @@ import sys
 import json
 import argparse
 import subprocess
+from typing import Optional, Tuple
 
-def detect_test_runner(repo_path):
+def detect_test_runner(repo_path: str) -> Optional[str]:
     """Detecta automaticamente qual ferramenta de teste/linter usar com base na estrutura do projeto."""
     abs_path = os.path.abspath(repo_path)
 
@@ -27,7 +28,6 @@ def detect_test_runner(repo_path):
     if os.path.exists(os.path.join(abs_path, "pytest.ini")) or \
        os.path.exists(os.path.join(abs_path, "tests")) or \
        any(f.endswith(".py") for f in os.listdir(abs_path) if os.path.isfile(os.path.join(abs_path, f))):
-        # Tenta pytest primeiro, caindo para python -m unittest se necessário
         return "pytest"
 
     # 3. Rust
@@ -44,7 +44,7 @@ def detect_test_runner(repo_path):
 
     return None
 
-def _build_command(command, abs_path):
+def _build_command(command: str, abs_path: str) -> str:
     """Resolve o comando de validação preferindo o .venv do projeto quando existir."""
     if command == "pytest":
         venv_py = os.path.join(abs_path, ".venv", "bin", "python")
@@ -53,7 +53,7 @@ def _build_command(command, abs_path):
     return command
 
 
-def run_validation(repo_path, command=None, timeout=60):
+def run_validation(repo_path: str, command: Optional[str] = None, timeout: int = 60) -> Tuple[bool, str]:
     """Executa a validação e retorna status, stdout e stderr."""
     abs_path = os.path.abspath(repo_path)
 
